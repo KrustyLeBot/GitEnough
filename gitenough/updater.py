@@ -133,11 +133,18 @@ def relaunch(exe: str) -> None:
     subprocess.Popen([exe], creationflags=flags, close_fds=True, cwd=os.path.dirname(exe))
 
 
-def cleanup_previous() -> None:
-    """Remove the executable left behind by the last self-update."""
-    exe = running_exe()
-    if exe and os.path.exists(exe + ".old"):
-        try:
-            os.remove(exe + ".old")
-        except OSError:
-            pass  # Still locked by the exiting process: next start.
+def cleanup_previous(exe: str | None = None) -> bool:
+    """Remove the executable left behind by the last self-update; True once nothing is left.
+
+    Right after an update the previous process is still exiting and keeps the .old file locked for a few
+    seconds, so callers retry until this returns True.
+    """
+    exe = exe or running_exe()
+    old = exe + ".old" if exe else ""
+    if not old or not os.path.exists(old):
+        return True
+    try:
+        os.remove(old)
+        return True
+    except OSError:
+        return False

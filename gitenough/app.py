@@ -463,7 +463,13 @@ class MainWindow(QMainWindow):
         self.fetch_timer.timeout.connect(self.auto_fetch)
         self.apply_auto_fetch()
         self.toast: UpdateToast | None = None
-        updater.cleanup_previous()
+        # The previous exe (after a self-update) stays locked while that process exits: retry every
+        # 2 s for 2 minutes.
+        self._cleanup_tries = 0
+        self.cleanup_timer = QTimer(self)
+        self.cleanup_timer.timeout.connect(self._cleanup_old_exe)
+        if not updater.cleanup_previous():
+            self.cleanup_timer.start(2000)
         # Update check shortly after start (the list comes first), then every 6 hours.
         QTimer.singleShot(5000, self.check_updates)
         self.update_timer = QTimer(self)
@@ -1307,6 +1313,11 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self.apply_auto_fetch()
             self.reload()
+
+    def _cleanup_old_exe(self):
+        self._cleanup_tries += 1
+        if updater.cleanup_previous() or self._cleanup_tries >= 60:
+            self.cleanup_timer.stop()
 
     def check_updates(self, manual: bool = False):
         def done(release, err):
