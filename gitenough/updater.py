@@ -39,12 +39,38 @@ def is_newer(remote: str, local: str = __version__) -> bool:
     return parse_version(remote) > parse_version(local)
 
 
-def fetch_release(timeout: int = 15) -> Release:
-    req = urllib.request.Request(VERSION_URL, headers={"User-Agent": USER_AGENT, "Cache-Control": "no-cache"})
+API_COMMITS = "https://api.github.com/repos/KrustyLeBot/GitEnough/commits?path=release/version.json&per_page=1"
+RAW_AT = "https://raw.githubusercontent.com/KrustyLeBot/GitEnough/{sha}/release/{name}"
+
+
+def _get_json(url: str, timeout: int):
+    req = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "application/vnd.github+json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
-    return Release(str(data["version"]), str(data["url"]), str(data.get("sha256", "")).lower(),
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def _release(data: dict, url: str) -> Release:
+    return Release(str(data["version"]), url, str(data.get("sha256", "")).lower(),
                    int(data.get("size", 0)), str(data.get("notes", "")))
+
+
+def fetch_release(timeout: int = 15) -> Release:
+    """The published release.
+
+    raw.githubusercontent.com caches what "main" points to for minutes, so right after a release it can
+    serve the old manifest (or an exe that does not match it). Asking the API for the commit of the latest
+    release, then reading both files at that exact commit, is always consistent. The branch URL stays as a
+    fallback (API rate limit: 60 requests per hour and IP).
+    """
+    if "GITENOUGH_UPDATE_URL" not in os.environ:
+        try:
+            sha = _get_json(API_COMMITS, timeout)[0]["sha"]
+            data = _get_json(RAW_AT.format(sha=sha, name="version.json"), timeout)
+            return _release(data, RAW_AT.format(sha=sha, name="GitEnough.exe"))
+        except (OSError, ValueError, KeyError, IndexError):
+            pass
+    data = _get_json(VERSION_URL, timeout)
+    return _release(data, str(data["url"]))
 
 
 def check() -> Release | None:
