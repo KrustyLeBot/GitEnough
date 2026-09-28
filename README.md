@@ -30,6 +30,8 @@ state at a glance, so you pull, switch and commit without opening each one.
 - Finds every git repository under a root folder, at any depth, plus the URLs you list (clone them in one click).
 - Status per repository: up to date, behind, ahead, diverged, local changes, stashes, off the base branch,
   rebase or merge in progress.
+- **Needs rebase** flag: when the base branch moved on (`↓3 develop · Rebase`), one click opens the rebase
+  assistant preset for that branch.
 - Filters (behind, changes, off base, needs attention…), alphabetical order with pinned projects on top.
 - **Pull all** clones what is missing and fast-forwards what is behind, in parallel.
 - Refreshes a repository as soon as its files change, and fetches in the background on a timer.

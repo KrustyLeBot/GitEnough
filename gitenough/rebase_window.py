@@ -26,7 +26,7 @@ def _box(text: str, color: str) -> QLabel:
 
 
 class RebaseWindow(QWidget):
-    def __init__(self, main, project, branch: str | None = None):
+    def __init__(self, main, project, branch: str | None = None, onto: str | None = None):
         super().__init__(main, Qt.Window)
         self.main, self.p, self.tasks = main, project, main.tasks
         self.path = project.path
@@ -64,7 +64,7 @@ class RebaseWindow(QWidget):
         root.addWidget(header)
 
         self.pages = QStackedWidget()
-        self.pages.addWidget(self._setup_page(branch))
+        self.pages.addWidget(self._setup_page(branch, onto))
         self.pages.addWidget(self._conflict_page())
         self.pages.addWidget(self._done_page())
         root.addWidget(self.pages, 1)
@@ -78,7 +78,7 @@ class RebaseWindow(QWidget):
             self.reload_setup()
 
     # ---------- page 1: setup ----------
-    def _setup_page(self, branch: str | None) -> QWidget:
+    def _setup_page(self, branch: str | None, onto: str | None) -> QWidget:
         page = QWidget()
         page.setObjectName("sidePanel")
         lay = QVBoxLayout(page)
@@ -103,6 +103,8 @@ class RebaseWindow(QWidget):
         ontos = ([f"origin/{base}"] if base in on_origin else []) + ([base] if base else [])
         ontos += [f"origin/{b}" for b in sorted(on_origin) if b != base] + [b for b in locals_ if b != base]
         self.onto_box.addItems(list(dict.fromkeys(ontos)))
+        if onto:
+            self.onto_box.setCurrentText(onto)
         row.addWidget(self.onto_box)
         self.fetch_first = QCheckBox("Fetch first")
         self.fetch_first.setChecked(True)

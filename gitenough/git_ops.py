@@ -53,6 +53,8 @@ class Snapshot:
     op_branch: str = ""  # branch being rebased
     stashes: int = 0
     solutions: list = field(default_factory=list)  # .sln / .slnx paths relative to the repo
+    base_ref: str = ""  # what the branch is compared with: origin/<base>, else <base>
+    base_behind: int = 0  # commits of base_ref missing from the current branch (a rebase would bring them)
 
 
 def _local_path(url: str) -> str | None:
@@ -305,6 +307,18 @@ def read_status(path: str) -> RepoStatus:
     return st
 
 
+# Base branch chosen per repository in its settings (folder id -> branch); set by the main window.
+BASE_OVERRIDES: dict[str, str] = {}
+
+
+def behind_count(path: str, ref: str) -> int:
+    """Commits of ref that HEAD does not contain."""
+    try:
+        return int(run_git(["rev-list", "--count", f"HEAD..{ref}", "--"], cwd=path, timeout=30).strip() or 0)
+    except (GitError, ValueError):
+        return 0
+
+
 # Candidate base branches in priority order; set from the config at startup.
 BASE_CANDIDATES: list[str] = ["develop", "main", "master"]
 
@@ -430,9 +444,13 @@ def inspect(url: str, path: str, cred: Credential | None, fetch: bool) -> Snapsh
         snap.op, snap.op_detail, snap.op_branch = in_progress(path)
         snap.stashes = stash_count(path)
         snap.solutions = find_solutions(path)
-        snap.base = base_branch(path, branches)
+        snap.base = BASE_OVERRIDES.get(os.path.normcase(os.path.normpath(path))) or base_branch(path, branches)
         if snap.base in branches:
             branches.insert(0, branches.pop(branches.index(snap.base)))
+        st = snap.status
+        if st and st.branch and snap.base and st.branch != snap.base and not in_progress(path)[0]:
+            snap.base_ref = f"origin/{snap.base}" if snap.base in on_origin else snap.base
+            snap.base_behind = behind_count(path, snap.base_ref)
     except GitError as exc:
         snap = Snapshot("repo", error=str(exc))
     snap.origin, snap.remote_mismatch = origin, mismatch

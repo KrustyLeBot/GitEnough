@@ -68,7 +68,7 @@ class Project:
 
 
 FILTERS = [("all", "All"), ("attention", "Needs attention"), ("behind", "Behind"), ("changes", "Changes"),
-           ("offbase", "Off base"), ("uptodate", "Up to date"), ("missing", "Not cloned")]
+           ("offbase", "Off base"), ("rebase", "Needs rebase"), ("uptodate", "Up to date"), ("missing", "Not cloned")]
 
 
 def matches(p: Project, key: str) -> bool:
@@ -85,6 +85,8 @@ def matches(p: Project, key: str) -> bool:
         return bool(st and st.behind and not p.mismatch)
     if key == "offbase":
         return bool(st and snap.base and st.branch and not snap.op and st.branch != snap.base)
+    if key == "rebase":
+        return bool(snap.base_behind)
     if key == "attention":
         return bool(snap.error or snap.op or p.mismatch or snap.kind == "notrepo"
                     or (st and ((st.ahead and st.behind) or st.upstream_gone)))
@@ -215,8 +217,9 @@ class Row:
         self.branch.setMinimumWidth(170)
         self.branch.setMaxVisibleItems(18)
         self.branch.activated.connect(self.on_branch)
-        self.base_flag = QLabel()
-        self.base_flag.setStyleSheet(pill_css(C["orange"]) + "padding: 2px 8px; font-size: 8.5pt;")
+        # Clickable: when the base moved on, it opens the rebase assistant preset for this branch.
+        self.base_flag = QPushButton()
+        self.base_flag.clicked.connect(self.on_base_flag)
         self.changes = QPushButton()
         self.changes.clicked.connect(lambda: win.open_changes(p))
         self.stash = QPushButton()
@@ -259,7 +262,7 @@ class Row:
         self.cells[1].layout().setStretch(0, 1)
         # Rows are disabled while busy; a disabled focused widget hands focus to the next one in the
         # table, and the table then scrolls to it (back to the top). Mouse-only widgets avoid that.
-        for widget in (self.pin, self.compare, self.check, self.pill, self.branch, self.manage, self.changes,
+        for widget in (self.pin, self.compare, self.base_flag, self.check, self.pill, self.branch, self.manage, self.changes,
                        self.stash, self.action,
                        self.tree, self.bash, self.vs, self.code, self.folder, self.web, self.gear):
             widget.setFocusPolicy(Qt.NoFocus)
@@ -277,6 +280,11 @@ class Row:
         st = self.p.status
         if st and target != st.branch and not target.startswith("("):
             self.win.switch_branch(self.p, target)
+
+    def on_base_flag(self):
+        snap = self.p.snap
+        if snap and snap.base_behind:
+            self.win.open_rebase(self.p, snap.status.branch, snap.base_ref)
 
     def on_action(self):
         kind = self.action_kind()
@@ -347,8 +355,18 @@ class Row:
         self.base_flag.setVisible(off_base)
         self.compare.setVisible(off_base)
         if off_base:
-            self.base_flag.setText(f"≠ {p.snap.base}")
-            self.base_flag.setToolTip(f"Not on the base branch ({p.snap.base})")
+            behind, ref = p.snap.base_behind, p.snap.base_ref or p.snap.base
+            if behind:
+                self.base_flag.setText(f"↓{behind} {p.snap.base} · Rebase")
+                set_css(self.base_flag, pill_css(C["orange"]) + "border: none; padding: 2px 9px; font-size: 8.5pt;")
+                self.base_flag.setToolTip(f"{behind} commit(s) on {ref} are not in {st.branch}.\n"
+                                          f"Click to rebase {st.branch} onto {ref}.")
+                self.base_flag.setCursor(Qt.PointingHandCursor)
+            else:
+                self.base_flag.setText(f"≠ {p.snap.base}")
+                set_css(self.base_flag, pill_css(C["grey"]) + "border: none; padding: 2px 9px; font-size: 8.5pt;")
+                self.base_flag.setToolTip(f"Not on the base branch, but up to date with {ref}: no rebase needed")
+                self.base_flag.setCursor(Qt.ArrowCursor)
         tips = [f"Tracks {st.upstream}"] if st and st.upstream else []
         if st and st.changes:
             tips.append("Local changes are carried over; on conflict you can stash and retry")
@@ -583,6 +601,7 @@ class MainWindow(QMainWindow):
         """Scan the root folder in the background, then rebuild the list."""
         cfg = self.config
         git_ops.BASE_CANDIDATES = list(cfg.base_branches)
+        git_ops.BASE_OVERRIDES = {k: v["base"] for k, v in cfg.repo_overrides.items() if v.get("base")}
         self.subtitle.setText(f"{cfg.root}  ↗" if cfg.root else "No root folder")
         if not cfg.root:
             self._show_projects([])
@@ -942,6 +961,7 @@ class MainWindow(QMainWindow):
 
     def update_project(self, p: Project, reorder: bool):
         """Apply a project's new settings without touching the others (no rescan, no fetch)."""
+        git_ops.BASE_OVERRIDES = {k: v["base"] for k, v in self.config.repo_overrides.items() if v.get("base")}
         p.title = self._title_of(p)
         if reorder:
             self.build_rows()  # Name or pin changed: its position in the list may change.
@@ -1068,9 +1088,9 @@ class MainWindow(QMainWindow):
             self.refresh_project(pr)
             self.refresh_windows(pr)
 
-    def open_rebase(self, p: Project, branch: str | None = None):
+    def open_rebase(self, p: Project, branch: str | None = None, onto: str | None = None):
         if p.snap and p.snap.kind == "repo":
-            win = self._open_window("rebase", p, lambda: RebaseWindow(self, p, branch))
+            win = self._open_window("rebase", p, lambda: RebaseWindow(self, p, branch, onto))
             win.destroyed.connect(lambda *_: self.refresh_windows(p))
 
     def open_merge_tool(self, p: Project, file: str):
