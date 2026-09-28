@@ -7,13 +7,13 @@ import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QByteArray, QEvent, Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QGuiApplication
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QGuiApplication, QPalette
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QComboBox, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox,
                                QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
                                QVBoxLayout, QWidget)
 
-from . import __version__, discovery, git_ops, ides, repo, repo_dialog, vault
+from . import __version__, discovery, git_ops, ides, rebase, repo, repo_dialog, updater, vault
 from .branches_window import BranchesWindow
 from .changes_window import ChangesWindow
 from .compare_window import CompareWindow
@@ -22,12 +22,14 @@ from .diff_view import warm_up_lexers
 from .errors import explain
 from .file_history_window import FileHistoryWindow
 from .git_ops import Credential, Snapshot, folder_names, is_http, parse_url, same_repo
-from .repo_dialog import DeleteRepoDialog, RepoSettingsDialog
+from .rebase_window import RebaseWindow
+from .repo_dialog import DeleteRepoDialog, RepoSettingsDialog, ResetDialog
 from .settings_dialog import SettingsDialog
 from .stash_window import StashWindow
 from .tree_window import TreeWindow
 from .style import QSS, C, app_icon, arrow_pixmap, check_pixmap, chevron_pixmap, make_icon, pill_css
 from .tasks import Tasks
+from .update_toast import UpdateToast
 from .watcher import RepoWatcher
 from .widgets import ErrorDialog, NoWheelComboBox, confirm_discard_all, icon_button, set_css
 
@@ -287,7 +289,10 @@ class Row:
         elif kind in ("push", "publish"):
             self.win.push_project(self.p)
         elif kind == "bash":
-            self.win.open_bash(self.p.path)
+            if self.p.snap and self.p.snap.op == "rebase":
+                self.win.open_rebase(self.p)
+            else:
+                self.win.open_bash(self.p.path)
         else:
             self.win.sync_project(self.p)
 
@@ -376,7 +381,8 @@ class Row:
             "publish": ("Publish", "Push this branch to origin and track it"),
             "push": ("Push", "Push local commits"),
             "pull": ("Pull", "Fetch, then fast-forward if behind"),
-            "bash": ("Git Bash", "Open Git Bash to finish the operation in progress"),
+            "bash": ("Resolve…", "Resolve the conflicts and continue the rebase")
+            if p.snap and p.snap.op == "rebase" else ("Git Bash", "Open Git Bash to finish the operation in progress"),
             "none": ("No remote", "This repository has no origin remote"),
         }[self.action_kind()]
         self.action.setText(text)
@@ -438,6 +444,13 @@ class MainWindow(QMainWindow):
         self.fetch_timer = QTimer(self)
         self.fetch_timer.timeout.connect(self.auto_fetch)
         self.apply_auto_fetch()
+        self.toast: UpdateToast | None = None
+        updater.cleanup_previous()
+        # Update check shortly after start (the list comes first), then every 6 hours.
+        QTimer.singleShot(5000, self.check_updates)
+        self.update_timer = QTimer(self)
+        self.update_timer.timeout.connect(self.check_updates)
+        self.update_timer.start(6 * 3600 * 1000)
 
     # ---------- UI ----------
     def _build_ui(self):
@@ -884,6 +897,10 @@ class MainWindow(QMainWindow):
             self.hide_repo(p)
         elif dialog.action == "delete":
             self.delete_repo(p)
+        elif dialog.action == "rebase":
+            self.open_rebase(p)
+        elif dialog.action == "reset":
+            self.reset_to_remote(p)
         else:
             order = (p.title, p.id in self.config.pinned)
             dialog.apply()
@@ -1051,6 +1068,46 @@ class MainWindow(QMainWindow):
             self.refresh_project(pr)
             self.refresh_windows(pr)
 
+    def open_rebase(self, p: Project, branch: str | None = None):
+        if p.snap and p.snap.kind == "repo":
+            win = self._open_window("rebase", p, lambda: RebaseWindow(self, p, branch))
+            win.destroyed.connect(lambda *_: self.refresh_windows(p))
+
+    def open_merge_tool(self, p: Project, file: str):
+        from .merge_tool import MergeToolWindow
+        left, right = rebase.conflict_sides(p.path)
+        win = self._open_window(f"merge:{file}", p, lambda: MergeToolWindow(self, p, file, left, right))
+        win.resolved.connect(lambda _f: (self.refresh_project(p), self.refresh_windows(p)))
+
+    def reset_to_remote(self, p: Project):
+        if p.busy or not (p.snap and p.snap.kind == "repo"):
+            return
+        dialog = ResetDialog(self, p)
+        if not dialog.exec():
+            return
+        target = dialog.target.currentText()
+        opts = (dialog.stash.isChecked(), dialog.backup.isChecked(), dialog.clean.isChecked(),
+                dialog.delete_old.isChecked() and dialog.delete_old.isVisible())
+        fetch = dialog.fetch.isChecked()
+        cred = self.cred(p)
+        self.set_busy(p, "Resetting…")
+
+        def work():
+            if fetch:
+                git_ops.run_git(["fetch", "--prune"], cwd=p.path, cred=cred, timeout=180)
+            return rebase.reset_to_remote(p.path, target, *opts)
+
+        def done(report, err):
+            p.busy = ""
+            self.refresh_project(p)
+            self.refresh_windows(p)
+            if err:
+                self.show_error(p, str(err), "Reset to remote branch")
+            else:
+                self.statusBar().showMessage(f"{p.title or p.name}: {report}", 10000)
+
+        (self.tasks.submit_network if fetch else self.tasks.submit)(work, done)
+
     def open_stashes(self, p: Project):
         if p.snap and p.snap.kind == "repo":
             self._open_window("stashes", p, lambda: StashWindow(self, p))
@@ -1179,6 +1236,8 @@ class MainWindow(QMainWindow):
             (None, None, True),
             ("Changes…", lambda: self.open_changes(p), is_repo),
             ("Compare with base…", lambda: self.open_compare(p), is_repo),
+            ("Rebase onto…", lambda: self.open_rebase(p), is_repo and (not p.snap.op or p.snap.op == "rebase")),
+            ("Reset to remote branch…", lambda: self.reset_to_remote(p), is_repo and not p.snap.op),
             ("History…", lambda: self.open_tree(p), is_repo),
             ("Branches…", lambda: self.open_branches(p), is_repo),
             ("Stashes…", lambda: self.open_stashes(p), is_repo),
@@ -1228,6 +1287,29 @@ class MainWindow(QMainWindow):
         if dialog.exec():
             self.apply_auto_fetch()
             self.reload()
+
+    def check_updates(self, manual: bool = False):
+        def done(release, err):
+            if err:
+                if manual:
+                    QMessageBox.warning(self, "Check for updates", f"Could not check for updates:\n{err}")
+                return
+            if release is None:
+                if manual:
+                    QMessageBox.information(self, "Check for updates",
+                                            f"You have the latest version ({__version__}).")
+                return
+            if self.toast is None or self.toast.release.version != release.version:
+                self.toast = UpdateToast(self, release)
+            self.toast.place()
+            self.toast.show()
+
+        self.tasks.submit_network(updater.check, done)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self.toast is not None and self.toast.isVisible():
+            self.toast.place()  # Stays pinned to the top-right corner.
 
     def eventFilter(self, obj, event):
         if obj is self.table.viewport() and event.type() == QEvent.Resize:
@@ -1283,6 +1365,17 @@ def open_terminal(path: str):
 def apply_style(app: QApplication):
     # Fusion: the look comes from the stylesheet; the native Windows 11 style adds its own accent bars on top.
     app.setStyle("Fusion")
+    # Dark palette underneath the stylesheet: Fusion's defaults are light, and any widget the stylesheet
+    # does not cover (scroll area viewports, popups) would otherwise flash white.
+    pal = QPalette()
+    for role, color in ((QPalette.Window, C["bg"]), (QPalette.Base, C["surface"]), (QPalette.AlternateBase,
+                        C["surface2"]), (QPalette.Text, C["text"]), (QPalette.WindowText, C["text"]),
+                        (QPalette.Button, C["surface2"]), (QPalette.ButtonText, C["text"]),
+                        (QPalette.Highlight, "#34406b"), (QPalette.HighlightedText, C["text"]),
+                        (QPalette.ToolTipBase, C["surface2"]), (QPalette.ToolTipText, C["text"]),
+                        (QPalette.PlaceholderText, C["faint"])):
+        pal.setColor(role, QColor(color))
+    app.setPalette(pal)
     # QSS needs image files for the checkbox tick and combo arrow; render them once to temp.
     qss = QSS
     for key, pixmap in (("check", check_pixmap()), ("arrow", arrow_pixmap()),

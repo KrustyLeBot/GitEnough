@@ -45,6 +45,13 @@ state at a glance, so you pull, switch and commit without opening each one.
 - Create, rename, delete and clean up merged branches; tags; stashes (apply, pop, drop).
 - Compare a branch with its base, like a merge request preview.
 - File history and blame.
+- **Rebase onto** assistant (`git rebase --onto`): pick the branch, the new base and the old base commit, see
+  exactly which commits move, then force push **with lease** when done. Warns when the branch is behind its
+  remote.
+- **Built-in merge tool**: for every conflict, keep one side, both (in either order), neither, or write your own
+  text. Sides are named after their branch (`origin/develop`, `feature/x`, `stash`), never "ours / theirs".
+- **Reset to a remote branch**: after someone force-pushed, recreate your local branch from `origin/…` in one
+  click, with your changes stashed and your old commits kept in a backup branch.
 - Conflicts explained in plain words, with **Stash & retry** when local changes block a pull or a switch.
 
 **Per repository**
@@ -64,6 +71,12 @@ state at a glance, so you pull, switch and commit without opening each one.
 4. For HTTPS remotes, add a Personal Access Token per host in **Settings > Access (PAT)**. SSH remotes use your
    SSH keys.
 
+## Updates
+
+GitEnough checks this repository at start and every 6 hours. When a newer version is published, a notification
+offers **Update now**: the new executable is downloaded, checked against the published size and SHA-256, swapped
+in place of the running one, and restarted. *Settings > About > Check for updates* checks on demand.
+
 ## Security and privacy
 
 - Tokens are stored in the **Windows Credential Manager** (encrypted with your Windows session). They are never
@@ -71,7 +84,7 @@ state at a glance, so you pull, switch and commit without opening each one.
 - The configuration lives in `%APPDATA%\GitEnough\config.json`. Export / import (Settings > General) shares the
   repository list with your team, without any token.
 - Background git commands never take the index lock, so they cannot get in the way of your own git commands.
-- No telemetry: GitEnough only talks to your git servers.
+- No telemetry: GitEnough only talks to your git servers, plus this repository for the update check.
 
 ## Build from source
 
@@ -85,6 +98,10 @@ python -m venv .venv
 
 The executable is written to `dist\GitEnough.exe` and copied to `release\`. To run without building:
 `.\.venv\Scripts\python.exe main.py`.
+
+## License
+
+[MIT](LICENSE)
 
 ## Good enough
 

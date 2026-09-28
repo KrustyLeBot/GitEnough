@@ -59,6 +59,8 @@ QPushButton#danger:hover {{ background: rgba(242,107,107,0.12); border-color: rg
 QPushButton#danger:disabled {{ color: {C['faint']}; }}
 QPushButton#dangerSmall {{ color: {C['red']}; padding: 4px 12px; font-size: 9pt; }}
 QPushButton#dangerSmall:hover {{ background: rgba(242,107,107,0.12); }}
+#toast {{ background: {C['surface2']}; border: 1px solid #3d4778; border-radius: 12px; }}
+#conflictCard {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px; }}
 #selBar {{ background: #1a2038; border-bottom: 1px solid #2d3660; }}
 
 QLineEdit, QPlainTextEdit {{ background: {C['surface']}; border: 1px solid {C['border']};
@@ -133,7 +135,9 @@ QScrollArea#plainScroll > QWidget > QWidget {{ background: transparent; }}
 
 QListWidget#files {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px;
                      padding: 4px 0; outline: none; }}
-QListWidget#files::item {{ border: none; background: transparent; }}
+QListWidget#files::item {{ border: none; background: transparent; padding: 4px 6px; }}
+QListWidget#files::item:selected {{ background: #262c3a; border-radius: 6px; }}
+QScrollArea#mergeScroll, QScrollArea#mergeScroll > QWidget > QWidget {{ background: {C['bg']}; border: none; }}
 QTreeWidget#fileView {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 10px;
                         padding: 4px 0; outline: none; }}
 QTreeWidget#fileView::item {{ border: none; background: transparent; }}

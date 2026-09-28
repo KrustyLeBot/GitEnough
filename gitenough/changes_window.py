@@ -7,7 +7,7 @@ from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
-from . import repo
+from . import rebase, repo
 from .diff_view import DiffView, parse_diff
 from .errors import explain
 from .file_view import ExtensionBar, FileView, extension
@@ -366,6 +366,9 @@ class ChangesWindow(QWidget):
 
     # ---------- actions ----------
     def toggle(self, view: FileView, files: list[FileChange]):
+        if len(files) == 1 and files[0].code == "U":
+            self.main.open_merge_tool(self.p, files[0].path)  # A conflict is resolved, not staged.
+            return
         if view is self.staged_view:
             self.unstage(files)
         else:
@@ -393,6 +396,11 @@ class ChangesWindow(QWidget):
         box.exec()
         if box.clickedButton() is confirm:
             self.run(repo.discard, files, "Discarding changes")
+
+    def keep_side(self, fc: FileChange, side: str, label: str):
+        self.set_busy(True, f"Keeping the {label} version…")
+        self.tasks.submit(rebase.take_side, lambda _r, err: self._after(err, "Resolve conflict"), self.path,
+                          fc.path, side)
 
     def ignore(self, files: list[FileChange]):
         if not files or self.busy:
@@ -482,6 +490,12 @@ class ChangesWindow(QWidget):
         menu = QMenu(self)
         entries = [(("Unstage" if view is self.staged_view else "Stage") + ("" if single else f" {len(files)} files"),
                     lambda: self.toggle(view, files), True)]
+        if single and fc.code == "U":
+            left, right = rebase.conflict_sides(self.path)
+            entries = [("Resolve conflict…", lambda: self.main.open_merge_tool(self.p, fc.path), True),
+                       (f"Keep {left} version", lambda: self.keep_side(fc, "ours", left), True),
+                       (f"Keep {right} version", lambda: self.keep_side(fc, "theirs", right), True),
+                       (None, None, True)] + entries[1:]
         if view is self.unstaged_view:
             entries.append(("Discard changes…", lambda: self.discard(files), True))
             entries.append(("Ignore…", lambda: self.ignore(files), True))

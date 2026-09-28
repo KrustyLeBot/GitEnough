@@ -136,13 +136,13 @@ def kill_all() -> None:
 
 
 def run_git(args: list[str], cwd: str | None = None, cred: Credential | None = None,
-            timeout: int = 120, stdin: bytes | None = None) -> str:
-    out = run_git_bytes(args, cwd, cred, timeout, stdin)
+            timeout: int = 120, stdin: bytes | None = None, env_extra: dict | None = None) -> str:
+    out = run_git_bytes(args, cwd, cred, timeout, stdin, env_extra)
     return out.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
 def run_git_bytes(args: list[str], cwd: str | None = None, cred: Credential | None = None,
-                  timeout: int = 120, stdin: bytes | None = None) -> bytes:
+                  timeout: int = 120, stdin: bytes | None = None, env_extra: dict | None = None) -> bytes:
     """Raw stdout: patches must keep the exact bytes (CRLF line endings, encodings)."""
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
@@ -154,6 +154,7 @@ def run_git_bytes(args: list[str], cwd: str | None = None, cred: Credential | No
     # wake the file watcher, which runs git status again, in a loop. It also never competes with the
     # user's own git commands for index.lock.
     env["GIT_OPTIONAL_LOCKS"] = "0"
+    env.update(env_extra or {})
     if cred:
         basic = base64.b64encode(f"{cred.username}:{cred.token}".encode()).decode()
         # Passed through env, not argv, so the token is neither persisted nor visible in the process list.
@@ -366,6 +367,13 @@ def list_refs(path: str) -> tuple[list[str], set[str]]:
                 if remote == "origin":
                     on_origin.add(branch)
     return sorted(names, key=str.lower), on_origin
+
+
+def local_branches(path: str) -> list[str]:
+    disk = _refs_from_disk(path)
+    refs = disk if disk is not None else run_git(["for-each-ref", "--format=%(refname)", "refs/heads"],
+                                                 cwd=path, timeout=30).split()
+    return sorted((r[len("refs/heads/"):] for r in refs if r.startswith("refs/heads/")), key=str.lower)
 
 
 def list_branches(path: str) -> list[str]:

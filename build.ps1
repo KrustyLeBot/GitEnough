@@ -16,4 +16,5 @@ if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed (is GitEnough.exe still run
 # release\ holds the committed copy that the README download link points to.
 New-Item -ItemType Directory -Force release | Out-Null
 Copy-Item dist\GitEnough.exe release\GitEnough.exe -Force
+& $py tools\write_version.py  # size + SHA-256 read by the in-app update check
 Write-Host "OK -> dist\GitEnough.exe (copied to release\)"

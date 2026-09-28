@@ -154,6 +154,24 @@ class RepoSettingsDialog(QDialog):
         opts.addStretch()
         lay.addLayout(opts)
 
+        # --- branch tools
+        lay.addSpacing(8)
+        lay.addWidget(_section("Branch tools"))
+        tools = QHBoxLayout()
+        is_repo = bool(project.snap and project.snap.kind == "repo")
+        rebase_btn = QPushButton("Rebase onto…")
+        rebase_btn.setToolTip("Move your commits onto another base (git rebase --onto), resolve conflicts, "
+                              "force push with lease")
+        rebase_btn.clicked.connect(lambda: self._finish("rebase"))
+        reset_btn = QPushButton("Reset to remote branch…")
+        reset_btn.setToolTip("Recreate the local branch from origin/<branch>: for when the remote was rewritten")
+        reset_btn.clicked.connect(lambda: self._finish("reset"))
+        for b in (rebase_btn, reset_btn):
+            b.setEnabled(is_repo)
+            tools.addWidget(b)
+        tools.addStretch()
+        lay.addLayout(tools)
+
         # --- danger zone
         lay.addSpacing(10)
         line = QFrame()
@@ -243,6 +261,102 @@ class RepoSettingsDialog(QDialog):
             self.main.set_enabled(self.p, self.include.isChecked())
         cfg.pinned = [x for x in cfg.pinned if x != self.p.id] + ([self.p.id] if self.pinned.isChecked() else [])
         cfg.save()
+
+
+class ResetDialog(QDialog):
+    """Make a local branch an exact copy of a remote branch (typically after a rebase done by someone else)."""
+
+    def __init__(self, main, project):
+        super().__init__(main)
+        self.main, self.p = main, project
+        snap = project.snap
+        current = snap.status.branch if snap and snap.status else None
+        self.setWindowTitle("Reset to a remote branch")
+        self.setMinimumWidth(620)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(24, 20, 24, 16)
+        lay.setSpacing(8)
+        title = QLabel("Reset to a remote branch")
+        title.setStyleSheet("font-size: 13pt; font-weight: 700;")
+        lay.addWidget(title)
+        lay.addWidget(_hint("The local branch with the same name is recreated from the remote one and checked "
+                            "out. Use it when the remote branch was rewritten (rebased, force-pushed) and you just "
+                            "want the clean remote version."))
+        row = QHBoxLayout()
+        row.addWidget(QLabel("Remote branch"))
+        self.target = QComboBox()
+        targets = [f"origin/{b}" for b in sorted(snap.on_origin, key=str.lower)] if snap else []
+        self.target.addItems(targets)
+        if current and current in (snap.on_origin if snap else set()):
+            self.target.setCurrentText(f"origin/{current}")
+        elif snap and snap.base in snap.on_origin:
+            self.target.setCurrentText(f"origin/{snap.base}")
+        self.target.currentTextChanged.connect(self.update_preview)
+        row.addWidget(self.target, 1)
+        lay.addLayout(row)
+        self.info = QLabel("")
+        self.info.setWordWrap(True)
+        self.info.setTextFormat(Qt.RichText)
+        lay.addWidget(self.info)
+        self.fetch = QCheckBox("Fetch first, to reset to the latest remote state")
+        self.fetch.setChecked(True)
+        self.stash = QCheckBox("Stash my uncommitted changes (otherwise they are lost)")
+        self.stash.setChecked(True)
+        self.backup = QCheckBox("Keep the current local commits in a backup/… branch")
+        self.backup.setChecked(True)
+        self.clean = QCheckBox("Also remove untracked files (clean checkout)")
+        self.delete_old = QCheckBox("")
+        for cb in (self.fetch, self.stash, self.backup, self.clean, self.delete_old):
+            cb.toggled.connect(self.update_preview)
+            lay.addWidget(cb)
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        cancel.setDefault(True)
+        self.ok = QPushButton("Reset")
+        self.ok.setObjectName("danger")
+        self.ok.clicked.connect(self.accept)
+        row.addWidget(cancel)
+        row.addWidget(self.ok)
+        lay.addLayout(row)
+        self.preview = None
+        self.update_preview()
+
+    def update_preview(self):
+        from . import rebase
+        target = self.target.currentText()
+        if not target:
+            self.info.setText("No branch on origin to reset to.")
+            self.ok.setEnabled(False)
+            return
+        if self.preview is None or self.preview.target != target:
+            try:
+                self.preview = rebase.reset_preview(self.p.path, target)
+            except GitError as exc:
+                self.info.setText(str(exc))
+                self.ok.setEnabled(False)
+                return
+        pv = self.preview
+        lines = [f"<b>{pv.local}</b> will match <b>{target}</b> exactly"
+                 + (f" (you are on <b>{pv.current}</b> now)." if pv.current and pv.current != pv.local else ".")]
+        if pv.lost_commits:
+            listed = "".join(f"<br>&nbsp;&nbsp;• {c.sha[:8]} {c.subject}" for c in pv.lost_commits[:8])
+            more = f"<br>&nbsp;&nbsp;… and {len(pv.lost_commits) - 8} more" if len(pv.lost_commits) > 8 else ""
+            color = C["muted"] if self.backup.isChecked() else C["red"]
+            lines.append(f"<span style='color:{color}'>{len(pv.lost_commits)} local commit(s) are not on "
+                         f"{target}{' and will be lost' if not self.backup.isChecked() else ''}:{listed}{more}"
+                         "</span>")
+        if pv.changes and not self.stash.isChecked():
+            lines.append(f"<span style='color:{C['red']}'>{pv.changes} uncommitted change(s) will be lost.</span>")
+        self.info.setText("<br>".join(lines))
+        self.stash.setVisible(bool(pv.changes))
+        self.backup.setVisible(bool(pv.lost_commits))
+        other = pv.current and pv.current != pv.local
+        self.delete_old.setVisible(bool(other))
+        if other:
+            self.delete_old.setText(f"Delete my local branch {pv.current} after switching")
+        self.ok.setEnabled(True)
 
 
 class DeleteRepoDialog(QDialog):

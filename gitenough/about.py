@@ -4,7 +4,7 @@ import math
 
 from PySide6.QtCore import QPointF, QRectF, QSize, Qt
 from PySide6.QtGui import QColor, QFont, QPainter, QPainterPath, QPen
-from PySide6.QtWidgets import QHBoxLayout, QLabel, QVBoxLayout, QWidget
+from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from . import __version__
 from .style import C, app_icon
@@ -123,3 +123,15 @@ class AboutPage(QWidget):
         body.addWidget(quote, 1, Qt.AlignVCenter)
         lay.addLayout(body)
         lay.addStretch()
+        row = QHBoxLayout()
+        check = QPushButton("Check for updates")
+        check.clicked.connect(self.check)
+        row.addWidget(check)
+        row.addStretch()
+        lay.addLayout(row)
+
+    def check(self):
+        # The main window owns the update flow (toast, download, restart).
+        win = self.window().parent() if self.window() else None
+        if win is not None and hasattr(win, "check_updates"):
+            win.check_updates(manual=True)
