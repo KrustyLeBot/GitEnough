@@ -12,6 +12,7 @@ from .style import C, chevron_pixmap
 from .widgets import CODE_COLORS
 
 DIR = "dir"
+CLEAR = "clear-filter"
 
 
 def extension(path: str) -> str:
@@ -310,7 +311,8 @@ class ExtensionBar(QLabel):
         self.setWordWrap(True)
         self.setTextFormat(Qt.RichText)
         self.setTextInteractionFlags(Qt.LinksAccessibleByMouse)
-        self.linkActivated.connect(lambda ext: self.toggled.emit(ext))
+        # An empty href is not clickable in Qt: the active extension links to CLEAR to switch the filter off.
+        self.linkActivated.connect(lambda ext: self.toggled.emit("" if ext == CLEAR else ext))
         self.hide()
 
     def set_files(self, files: list[FileChange], active: str):
@@ -323,7 +325,7 @@ class ExtensionBar(QLabel):
             on = ext == active
             color = C["text"] if on else C["muted"]
             bg = "background-color:#2a3152;" if on else ""
-            parts.append(f"<a href='{'' if on else ext}' style='color:{color}; text-decoration:none; {bg}'>"
+            parts.append(f"<a href='{CLEAR if on else ext}' style='color:{color}; text-decoration:none; {bg}'>"
                          f"&nbsp;{ext}&nbsp;<span style='color:{C['faint']}'>{n}</span>&nbsp;</a>")
         self.setText("&nbsp;".join(parts))
         self.setToolTip("Files by extension. Click one to show only those files, click it again to show all.")
