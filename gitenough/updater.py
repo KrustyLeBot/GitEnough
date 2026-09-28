@@ -129,8 +129,13 @@ def install(current_exe: str, new_file: str) -> str:
 
 
 def relaunch(exe: str) -> None:
+    # A onefile exe started by another one inherits its bootloader variables, takes itself for that
+    # process's child and loads its files from the parent's temp folder, deleted as the parent exits
+    # ("...\\shiboken6\\libshiboken does not exist"). The reset makes the new version unpack its own.
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("_PYI", "_MEIPASS"))}
+    env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
     flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
-    subprocess.Popen([exe], creationflags=flags, close_fds=True, cwd=os.path.dirname(exe))
+    subprocess.Popen([exe], creationflags=flags, close_fds=True, cwd=os.path.dirname(exe), env=env)
 
 
 def cleanup_previous(exe: str | None = None) -> bool:
