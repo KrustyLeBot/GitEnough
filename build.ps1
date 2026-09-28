@@ -13,4 +13,7 @@ $py = ".\.venv\Scripts\python.exe"
     --exclude-module tkinter `
     main.py
 if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed (is GitEnough.exe still running?)" }
-Write-Host "OK -> dist\GitEnough.exe"
+# release\ holds the committed copy that the README download link points to.
+New-Item -ItemType Directory -Force release | Out-Null
+Copy-Item dist\GitEnough.exe release\GitEnough.exe -Force
+Write-Host "OK -> dist\GitEnough.exe (copied to release\)"
