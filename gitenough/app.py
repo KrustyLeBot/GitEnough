@@ -851,13 +851,33 @@ class MainWindow(QMainWindow):
     def fix_remote(self, p: Project):
         if p.busy:
             return
-        current = git_ops.mask_url(p.snap.origin) if p.snap.origin else "(no origin remote)"
-        answer = QMessageBox.question(
-            self, "Fix remote",
-            f"<b>{p.name}</b><br><br>Current origin:<br><code>{current}</code><br><br>"
-            f"New origin:<br><code>{p.url}</code><br><br>"
-            "Local branches and changes are kept. Continue?")
-        if answer != QMessageBox.Yes:
+        origin = p.snap.origin if p.snap else ""
+        current = git_ops.mask_url(origin) if origin else "(no origin remote)"
+        box = QMessageBox(QMessageBox.Question, "Fix remote",
+                          f"<b>{p.title or p.name}</b>: the repository and the list disagree.<br><br>"
+                          f"Repository origin:<br><code>{current}</code><br><br>"
+                          f"URL in the list:<br><code>{git_ops.mask_url(p.url)}</code><br><br>"
+                          "Changed the remote yourself (git remote set-url)? Keep the repository URL. "
+                          "Local branches and changes are kept either way.", QMessageBox.Cancel, self)
+        keep = box.addButton("Keep the repository URL", QMessageBox.AcceptRole) if origin else None
+        use_listed = box.addButton("Use the listed URL", QMessageBox.AcceptRole)
+        box.setDefaultButton(keep or use_listed)
+        box.exec()
+        clicked = box.clickedButton()
+        if keep is not None and clicked is keep:
+            # The repository is right: the list follows it (no git call, no fetch).
+            self._replace_url(p.url, origin)
+            self.config.save()
+            p.url, p.host = origin, parse_url(origin)[0]
+            self._load_creds()
+            row = self.row_of(p)
+            if row and row.built:
+                row.url.setText("  ·  ".join(x for x in (p.rel.replace(os.sep, "/") if p.rel != p.name else "",
+                                                         origin) if x))
+            self.refresh_project(p)
+            self.statusBar().showMessage(f"{p.title or p.name}: list updated to {git_ops.mask_url(origin)}", 8000)
+            return
+        if clicked is not use_listed:
             return
         self.set_busy(p, "Updating remote…")
         self.tasks.submit_network(git_ops.fix_remote, lambda s, e: self.single_done(p, s, e, "Fix remote"),
