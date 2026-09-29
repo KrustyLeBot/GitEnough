@@ -385,10 +385,23 @@ class _SizeKeeper(QObject):
         self.win, self.config, self.kind, self.persist = win, config, kind, persist
         self.timer = QTimer(self, singleShot=True, interval=600)  # one save per drag, not per pixel
         self.timer.timeout.connect(self.save)
+        self.max_before_minimize = None  # set while the owner window is minimized
         win.installEventFilter(self)
+        parent = win.parentWidget()
+        self.owner = parent.window() if parent is not None else None
+        if self.owner is not None:
+            self.owner.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if obj is self.win:
+        if obj is self.owner and event.type() == QEvent.WindowStateChange:
+            # Qt on Windows un-maximizes owned windows when their owner comes back from the taskbar.
+            if obj.isMinimized():
+                self.max_before_minimize = self.win.isMaximized()
+            elif self.max_before_minimize is not None:
+                was_max, self.max_before_minimize = self.max_before_minimize, None
+                if was_max:
+                    QTimer.singleShot(50, self._remaximize)
+        elif obj is self.win:
             kind = event.type()
             if kind in (QEvent.Resize, QEvent.WindowStateChange) and obj.isVisible():
                 self.timer.start()
@@ -396,6 +409,10 @@ class _SizeKeeper(QObject):
                 self.timer.stop()
                 self.save()
         return False
+
+    def _remaximize(self):
+        if self.win.isVisible() and not self.win.isMaximized():
+            self.win.showMaximized()
 
     def save(self):
         win = self.win
