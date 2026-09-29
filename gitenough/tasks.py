@@ -23,6 +23,10 @@ class Tasks:
         self.ui = ThreadPoolExecutor(max_workers=ui_workers, thread_name_prefix="ui")
         self.network = ThreadPoolExecutor(max_workers=network_workers, thread_name_prefix="net")
         self.status = ThreadPoolExecutor(max_workers=status_workers, thread_name_prefix="status")
+        # Forge API calls and Claude runs get their own pools: a Pull all or an auto-fetch of every
+        # repository must not leave a merge request or a commit message suggestion waiting behind it.
+        self.api = ThreadPoolExecutor(max_workers=6, thread_name_prefix="api")
+        self.ai = ThreadPoolExecutor(max_workers=4, thread_name_prefix="ai")
         self._closed = False
         self._bridge = _Bridge()
         self._bridge.done.connect(self._deliver)
@@ -36,6 +40,16 @@ class Tasks:
                        *args: Any) -> None:
         """Slow work that talks to a remote."""
         self._submit(self.network, fn, callback, args)
+
+    def submit_api(self, fn: Callable[..., Any], callback: Callable[[Any, Exception | None], None],
+                   *args: Any) -> None:
+        """GitLab / forge REST calls the user is looking at."""
+        self._submit(self.api, fn, callback, args)
+
+    def submit_ai(self, fn: Callable[..., Any], callback: Callable[[Any, Exception | None], None],
+                  *args: Any) -> None:
+        """Claude Code runs (seconds to minutes each)."""
+        self._submit(self.ai, fn, callback, args)
 
     def submit_status(self, fn: Callable[..., Any], callback: Callable[[Any, Exception | None], None],
                       *args: Any) -> None:
@@ -59,5 +73,5 @@ class Tasks:
 
     def shutdown(self) -> None:
         self._closed = True
-        for pool in (self.ui, self.network, self.status):
+        for pool in (self.ui, self.network, self.status, self.api, self.ai):
             pool.shutdown(wait=False, cancel_futures=True)

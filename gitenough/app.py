@@ -433,6 +433,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.config = Config.load()
+        vault.set_scopes(self.config.hosts)
         self.tasks = Tasks()
         self.projects: list[Project] = []
         self.rows: list[Row] = []
@@ -521,7 +522,10 @@ class MainWindow(QMainWindow):
         settings_btn = QPushButton("⚙")
         settings_btn.setToolTip("Settings")
         settings_btn.clicked.connect(self.open_settings)
-        for w in (self.search, self.refresh_btn, self.pull_btn, settings_btn):
+        mr_btn = QPushButton("Merge requests")
+        mr_btn.setToolTip("GitLab merge requests where you are reviewer, assignee, mentioned or author")
+        mr_btn.clicked.connect(self.open_merge_requests)
+        for w in (self.search, mr_btn, self.refresh_btn, self.pull_btn, settings_btn):
             w.setCursor(Qt.PointingHandCursor)
             header.addWidget(w)
         root.addLayout(header)
@@ -606,6 +610,7 @@ class MainWindow(QMainWindow):
     def reload(self):
         """Scan the root folder in the background, then rebuild the list."""
         cfg = self.config
+        self.check_review_skill()
         git_ops.BASE_CANDIDATES = list(cfg.base_branches)
         git_ops.BASE_OVERRIDES = {k: v["base"] for k, v in cfg.repo_overrides.items() if v.get("base")}
         self.subtitle.setText(f"{cfg.root}  ↗" if cfg.root else "No root folder")
@@ -665,11 +670,7 @@ class MainWindow(QMainWindow):
     def _show_projects(self, projects: list[Project]):
         cfg = self.config
         self.projects = projects
-        self.creds = {}
-        for host in {p.host for p in self.projects if is_http(p.url)}:
-            token = vault.get_token(host)
-            if token:
-                self.creds[host] = Credential(cfg.hosts.get(host) or vault.default_username(host), token)
+        self._load_creds()
 
         self.bulk_total = self.bulk_done = self.bulk_errors = 0
         self.progress.hide()
@@ -725,7 +726,7 @@ class MainWindow(QMainWindow):
                 self.rows[i].build()
 
     def cred(self, p: Project) -> Credential | None:
-        return self.creds.get(p.host) if is_http(p.url) else None
+        return self.cred_for_url(p.url)
 
     def row_of(self, p: Project) -> Row | None:
         return next((r for r in self.rows if r.p is p), None)
@@ -952,12 +953,21 @@ class MainWindow(QMainWindow):
             self.update_project(p, reorder=order != (self._title_of(p), p.id in self.config.pinned))
 
     def _load_creds(self):
-        cfg = self.config
-        self.creds = {}
-        for host in {pr.host for pr in self.projects if is_http(pr.url)}:
-            token = vault.get_token(host)
-            if token:
-                self.creds[host] = Credential(cfg.hosts.get(host) or vault.default_username(host), token)
+        self.creds = {}  # token key -> Credential | None, filled on first use
+        vault.set_scopes(self.config.hosts)
+
+    def cred_for_url(self, url: str) -> Credential | None:
+        """Credential for a remote: its group's token when one is saved (several organizations on one
+        server, each with its own account), else its host's."""
+        if not is_http(url):
+            return None
+        host, parts = parse_url(url)
+        key = vault.scope_for(host, "/".join(parts))
+        if key not in self.creds:
+            key2, token = vault.token_for(host, "/".join(parts))
+            self.creds[key] = Credential(self.config.hosts.get(key2) or vault.default_username(key2),
+                                         token) if token else None
+        return self.creds[key]
 
     def _replace_url(self, old: str, new: str):
         """Swap a URL in the repository list (entries pointing at the same repository included)."""
@@ -1327,6 +1337,41 @@ class MainWindow(QMainWindow):
     def open_path(self, path: str):
         if os.path.isdir(path):
             os.startfile(path)
+
+    def check_review_skill(self):
+        """At each refresh: update the AI review skill from its source pipeline, or say it is gone."""
+        cfg = self.config
+        if not (cfg.review_skill and cfg.review_skill_source) or getattr(self, "_skill_checking", False):
+            return
+        if time.monotonic() - getattr(self, "_skill_checked", -1e9) < 300:
+            return  # a few API calls per check, at most every 5 minutes
+        self._skill_checking = True
+        from . import review_skill
+
+        def done(result, error):
+            self._skill_checking = False
+            self._skill_checked = time.monotonic()
+            if error or result is None or result.status == "error":
+                self.statusBar().showMessage(f"Review skill check failed: {error or result.message}", 10000)
+            elif result.status in ("updated", "installed"):
+                self.statusBar().showMessage(result.message, 10000)
+            elif result.status == "missing" and not getattr(self, "_skill_warned", False):
+                self._skill_warned = True  # once per session
+                QMessageBox.warning(self, "Review skill missing", result.message + "\n\nThe installed copy is "
+                                    "still used. Pick another skill in Settings > Claude, or choose none.")
+
+        self.tasks.submit_api(review_skill.check, done, cfg.review_skill_source, cfg.review_skill)
+
+    def open_merge_requests(self):
+        from .mr_list import MergeRequestsWindow
+
+        if getattr(self, "mr_window", None) is None:
+            self.mr_window = MergeRequestsWindow(self)  # kept: review windows live under it
+        elif not self.mr_window.isVisible():
+            self.mr_window.reload()
+        self.mr_window.show()
+        self.mr_window.raise_()
+        self.mr_window.activateWindow()
 
     def open_settings(self):
         dialog = SettingsDialog(self.config, self.tasks, self)

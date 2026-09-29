@@ -1,14 +1,15 @@
 import json
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import (QCheckBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from . import vault
+from . import ai, ai_review, review_skill, vault
 from .about import AboutPage
 from .config import Config
 from .git_ops import Credential, GitError, is_http, parse_url, same_repo, test_access
+from .gitlab import gitlab_hosts, parse_mr_url
 from .style import C
 from .tasks import Tasks
 from .widgets import keep_size
@@ -22,6 +23,11 @@ def parse_repo_lines(text: str) -> list[str]:
             seen.add(url)
             urls.append(url)
     return urls
+
+
+def _host_path(url: str) -> tuple[str, str]:
+    host, parts = parse_url(url)
+    return host, "/".join(parts)
 
 
 class HostRow(QFrame):
@@ -93,10 +99,11 @@ class HostRow(QFrame):
         return Credential(self.user.text().strip() or vault.default_username(self.host), token)
 
     def run_test(self):
-        url = next((u for u in self.dialog.current_urls()
-                    if is_http(u) and parse_url(u)[0] == self.host), None)
+        # A repository this token would serve: same host, and inside the group for a group token.
+        url = next((u for u in self.dialog.current_urls() + self.dialog.repo_urls
+                    if is_http(u) and vault.scope_for(*_host_path(u)) == self.host), None)
         if not url:
-            self.show_result(False, "No HTTPS repository from this host in the list.")
+            self.show_result(False, "No HTTPS repository served by this token in the list.")
             return
         self.test_btn.setEnabled(False)
         self.show_result(None, f"Testing {url}…")
@@ -125,6 +132,8 @@ class SettingsDialog(QDialog):
     def __init__(self, config: Config, tasks: Tasks, parent=None):
         super().__init__(parent)
         self.config, self.tasks = config, tasks
+        # Repositories found on disk are not in config.repos: their hosts count for the access checks.
+        self.repo_urls = [p.url for p in getattr(parent, "projects", [])]
         self.host_rows: dict[str, HostRow] = {}
         self.setWindowTitle("Settings")
         self.resize(760, 560)
@@ -141,6 +150,7 @@ class SettingsDialog(QDialog):
         self.tabs.addTab(self._general_tab(), "General")
         self.tabs.addTab(self._repos_tab(), "Repositories")
         self.tabs.addTab(self._access_tab(), "Access (PAT)")
+        self.tabs.addTab(self._claude_tab(), "Claude")
         self.tabs.addTab(AboutPage(), "About")
         self.tabs.currentChanged.connect(lambda i: i == 2 and self.sync_hosts())
         root.addWidget(self.tabs, 1)
@@ -225,6 +235,291 @@ class SettingsDialog(QDialog):
         lay.addStretch()
         return page
 
+    def _model_combo(self, value: str) -> QComboBox:
+        box = QComboBox()
+        box.setEditable(True)  # a full model name works too
+        for model, label in ai.MODEL_CHOICES:
+            box.addItem(label, model)
+        index = box.findData(value)
+        if index >= 0:
+            box.setCurrentIndex(index)
+        else:
+            box.setEditText(value)
+        return box
+
+    @staticmethod
+    def _model_of(box: QComboBox) -> str:
+        index = box.findText(box.currentText())
+        return box.itemData(index) if index >= 0 else box.currentText().strip()
+
+    @staticmethod
+    def _section(text: str) -> QLabel:
+        label = QLabel(text)
+        label.setStyleSheet("font-weight: 700; font-size: 10.5pt; margin-top: 6px;")
+        return label
+
+    def _claude_tab(self) -> QWidget:
+        """Everything Claude in one page: sign-in, commit messages, merge request reviews."""
+        page, lay = self._page()
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)  # long text wraps instead
+        scroll.setStyleSheet("QScrollArea { background: transparent; }")
+        holder = QWidget()
+        holder.setObjectName("claudePage")
+        holder.setStyleSheet("QWidget#claudePage { background: transparent; }")  # not its buttons
+        inner = QVBoxLayout(holder)
+        inner.setContentsMargins(0, 0, 6, 0)
+        inner.setSpacing(10)
+        scroll.setWidget(holder)
+        lay.addWidget(scroll)
+
+        inner.addWidget(self._section("Claude Code"))
+        inner.addWidget(self._hint(
+            "GitEnough uses Claude through Claude Code installed on this PC, signed in with your own Claude "
+            "subscription: no API key. Usage counts against that subscription."))
+        row = QHBoxLayout()
+        self.ai_state = QLabel("Claude Code: checking…")
+        self.ai_login = QPushButton("Sign in to Claude")
+        self.ai_login.clicked.connect(ai.open_login)
+        self.ai_login.hide()
+        row.addWidget(self.ai_state, 1)
+        row.addWidget(self.ai_login)
+        inner.addLayout(row)
+        self.tasks.submit(ai.status, self._on_ai_status)
+        ver_row = QHBoxLayout()
+        self.cli_version = QLabel("")
+        self.cli_version.setObjectName("muted")
+        update_cli = QPushButton("Update Claude Code")
+        update_cli.setToolTip("Runs `claude update` in a console. Model aliases (haiku, sonnet, opus) map to the "
+                              "newest models the installed version knows: update it to get the latest ones.")
+        update_cli.clicked.connect(ai.open_update)
+        ver_row.addWidget(self.cli_version, 1)
+        ver_row.addWidget(update_cli)
+        inner.addLayout(ver_row)
+        self.tasks.submit(ai.cli_version, lambda v, _e: self.cli_version.setText(
+            f"Installed version: {v}" if v else "Version unknown"))
+
+        inner.addWidget(self._section("Models"))
+        inner.addWidget(QLabel("Commit messages"))
+        self.commit_model = self._model_combo(self.config.ai_commit_model)
+        inner.addWidget(self.commit_model)
+        inner.addWidget(QLabel("Merge request reviews"))
+        self.review_model = self._model_combo(self.config.ai_review_model)
+        inner.addWidget(self.review_model)
+        inner.addWidget(self._hint("An alias always takes the newest model of that family. A full model name "
+                                   "(e.g. claude-sonnet-5) works too."))
+
+        inner.addWidget(self._section("Review skill (optional)"))
+        inner.addWidget(self._hint(
+            "A GitLab project whose CI builds .skill files as job artifacts. GitEnough lists the skills of its "
+            "newest successful pipeline, installs the one you pick for the Claude Code CLI "
+            "(~/.claude/skills; Claude Desktop is not touched), updates it at each Refresh, and warns "
+            "you when it disappears. Empty: GitEnough's built-in review method."))
+        src_row = QHBoxLayout()
+        self.skill_source = QLineEdit(self.config.review_skill_source)
+        self.skill_source.setPlaceholderText("https://gitlab.example.com/group/skills-project")
+        look = QPushButton("Look for skills")
+        look.clicked.connect(self._look_for_skills)
+        src_row.addWidget(self.skill_source, 1)
+        src_row.addWidget(look)
+        inner.addLayout(src_row)
+        pick_row = QHBoxLayout()
+        self.skill_combo = QComboBox()
+        self.skill_combo.addItem("None: built-in review method", None)
+        current = self.config.review_skill
+        if current:
+            info = review_skill.installed_info(current)
+            label = f"{current}  ·  installed" + (f" from pipeline #{info['pipeline']}" if info else " (missing)")
+            self.skill_combo.addItem(label, current)
+            self.skill_combo.setCurrentIndex(1)
+        use = QPushButton("Use this skill")
+        use.setObjectName("primary")
+        use.clicked.connect(self._use_skill)
+        pick_row.addWidget(self.skill_combo, 1)
+        pick_row.addWidget(use)
+        inner.addLayout(pick_row)
+        self.skill_state = QLabel("")
+        self.skill_state.setWordWrap(True)
+        self.skill_state.setObjectName("muted")
+        inner.addWidget(self.skill_state)
+        self.found_skills: list = []
+
+        access_head = QHBoxLayout()
+        access_head.addWidget(self._section("Access"))
+        access_head.addStretch()
+        recheck = QPushButton("Check again")
+        recheck.setObjectName("rowAction")
+        recheck.clicked.connect(self._check_access)
+        access_head.addWidget(recheck)
+        inner.addLayout(access_head)
+        self.access = QLabel("Checking…")
+        self.access.setTextFormat(Qt.RichText)
+        self.access.setWordWrap(True)
+        inner.addWidget(self.access)
+
+        inner.addWidget(self._section("Review clones"))
+        cache_row = QHBoxLayout()
+        self.cache_label = QLabel("Measuring…")
+        self.cache_label.setObjectName("muted")
+        self.cache_clean = QPushButton("Clean all")
+        self.cache_clean.setObjectName("danger")
+        self.cache_clean.clicked.connect(self._clean_cache)
+        cache_row.addWidget(self.cache_label, 1)
+        cache_row.addWidget(self.cache_clean)
+        inner.addLayout(cache_row)
+        inner.addWidget(self._hint(
+            "AI reviews read the code from GitEnough's own copies of the projects, never from your working "
+            "clones. They hold no file history and no Git LFS content, and are refreshed at each review. "
+            r"Folder: %LOCALAPPDATA%\GitEnough\review-cache"))
+        inner.addStretch()
+        self._measure_cache()
+        self._check_access()
+        return page
+
+    # ---------- review skill ----------
+    def _look_for_skills(self):
+        url = self.skill_source.text().strip()
+        if not url:
+            return
+        self.skill_state.setText("Looking at the newest successful pipelines and their artifacts…")
+
+        def done(skills, error):
+            if error:
+                self.skill_state.setText(f"<span style='color:{C['red']}'>●</span>  {error}")
+                self.skill_state.setTextFormat(Qt.RichText)
+                return
+            self.found_skills = skills
+            keep = self.skill_combo.currentData()
+            self.skill_combo.clear()
+            self.skill_combo.addItem("None: built-in review method", None)
+            for sk in skills:
+                self.skill_combo.addItem(sk.label, sk.name)
+                self.skill_combo.setItemData(self.skill_combo.count() - 1, sk.description or sk.file, Qt.ToolTipRole)
+            index = self.skill_combo.findData(keep)
+            self.skill_combo.setCurrentIndex(index if index >= 0 else (1 if skills else 0))
+            self.skill_state.setTextFormat(Qt.PlainText)
+            self.skill_state.setText(f"{len(skills)} skill(s) found in pipeline #{skills[0].pipeline}" if skills else
+                                     "No .skill file in the artifacts of the newest successful pipelines.")
+            self._check_access()
+
+        self.tasks.submit_api(lambda: review_skill.Source(url).latest_skills(), done)
+
+    def _use_skill(self):
+        name = self.skill_combo.currentData()
+        url = self.skill_source.text().strip()
+        old = self.config.review_skill
+        if not name:
+            if old:
+                review_skill.uninstall(old)
+            self.config.review_skill, self.config.review_skill_source = "", url
+            self.config.save()
+            self.skill_state.setTextFormat(Qt.PlainText)
+            self.skill_state.setText("No review skill: the built-in review method is used.")
+            return
+        self.skill_state.setTextFormat(Qt.PlainText)
+        self.skill_state.setText(f"Installing {name}…")
+
+        def done(result, error):
+            result = result or review_skill.CheckResult("error", str(error))
+            if result.status in ("error", "missing"):
+                self.skill_state.setTextFormat(Qt.RichText)
+                self.skill_state.setText(f"<span style='color:{C['red']}'>●</span>  {result.message}")
+                return
+            if old and old != name:
+                review_skill.uninstall(old)
+            self.config.review_skill, self.config.review_skill_source = name, url
+            self.config.save()  # installed already: the choice holds even if this dialog is cancelled
+            sk = result.skill
+            self.skill_state.setText(f"Using {name}" + (f", pipeline #{sk.pipeline}" if sk else "")
+                                     + f": {review_skill.installed_dir(name)}")
+
+        self.tasks.submit_api(review_skill.check, done, url, name)
+
+    def _check_access(self):
+        urls = [u for u in self.current_urls() + self.repo_urls if u.lower().startswith("http")]
+        hosts = {parse_url(u)[0] for u in urls} | {vault.host_of(k) for k in self.config.hosts}
+        hosts |= {m[0] for m in map(parse_mr_url, self.config.mr_links) if m}
+        source = self.skill_source.text().strip()
+        parsed = review_skill.parse_source(source) if source else None
+        if parsed:
+            hosts.add(parsed[0])
+        self.access.setText("Checking…")
+
+        def work():
+            rows = [self._claude_check()]
+            # Every GitLab server found, whatever its name (self-hosted ones too), each with its own token.
+            servers = gitlab_hosts(hosts)
+            for host in servers:
+                for key in vault.keys_of_host(host):  # the host's token and its groups' tokens
+                    if key == host and len(vault.keys_of_host(host)) > 1 and not vault.get_token(key):
+                        continue  # group tokens only: no host-wide token is expected
+                    rows += review_skill.check_token(key)
+            if source:
+                rows += review_skill.check_source(source)
+            if not servers:
+                rows.append(review_skill.Check(None, "No GitLab server found among your repositories yet"))
+            return rows
+
+        self.tasks.submit_api(work, self._on_access)
+
+    @staticmethod
+    def _claude_check():
+        st = ai.status()
+        if st.ready:
+            return review_skill.Check(True, "Claude Code signed in")
+        return review_skill.Check(False, st.detail, "Run `claude auth login`, or use Sign in in the Claude tab."
+                                  if st.path else "Install it from https://claude.com/claude-code")
+
+    def _on_access(self, rows, error):
+        if error:
+            self.access.setText(f"<span style='color:{C['red']}'>●</span> {error}")
+            return
+        html = []
+        for r in rows:
+            color = C["green"] if r.ok else C["orange"] if r.ok is None else C["red"]
+            detail = f"<br><span style='color:{C['muted']}'>{r.detail}</span>" if r.detail else ""
+            html.append(f"<span style='color:{color}'>●</span>&nbsp; {r.title}{detail}")
+        self.access.setText("<br>".join(html))
+
+    def _measure_cache(self):
+        self.tasks.submit(ai_review.cache_usage, self._on_cache)
+
+    def _on_cache(self, usage, error):
+        if error or usage is None:
+            self.cache_label.setText(f"Could not measure: {error}")
+            return
+        size, n = usage
+        text = f"{size / 1e9:.2f} GB" if size >= 1e9 else f"{size / 1e6:.0f} MB"
+        self.cache_label.setText(f"{text} in {n} project{'s' if n != 1 else ''}" if n else "Empty")
+        self.cache_clean.setEnabled(bool(n or size))
+
+    def _clean_cache(self):
+        if QMessageBox.question(self, "Review clones", "Delete every review clone? They are downloaded again "
+                                "at the next AI review of each project.") != QMessageBox.Yes:
+            return
+        self.cache_clean.setEnabled(False)
+        self.cache_label.setText("Cleaning…")
+        self.tasks.submit(ai_review.clear_cache, lambda _r, err: (
+            err and QMessageBox.warning(self, "Review clones", f"Some files could not be deleted "
+                                        f"(a review may be running):\n{err}"), self._measure_cache()))
+
+    def _on_ai_status(self, st, error):
+        if error or st is None:
+            self.ai_state.setText(f"Claude Code: {error}")
+            return
+        if st.ready:
+            self.ai_state.setText(f"<span style='color:{C['green']}'>●</span>  Claude Code signed in")
+            self.ai_state.setToolTip(st.path)
+        elif st.path:
+            self.ai_state.setText(f"<span style='color:{C['orange']}'>●</span>  {st.detail}")
+            self.ai_login.show()
+        else:
+            self.ai_state.setText(f"<span style='color:{C['red']}'>●</span>  Claude Code is not installed: "
+                                  "<a href='https://claude.com/claude-code'>install it</a>, then sign in")
+            self.ai_state.setOpenExternalLinks(True)
+
     def export_config(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export configuration", "gitenough-config.json",
                                               "JSON (*.json)")
@@ -306,7 +601,9 @@ class SettingsDialog(QDialog):
         page, lay = self._page()
         lay.addWidget(self._hint(
             "One token per git host. Tokens are stored in Windows Credential Manager "
-            "(encrypted by your Windows session), never in the config file or the repositories."))
+            "(encrypted by your Windows session), never in the config file or the repositories. "
+            "Several organizations on one server, each with its own account: add a token per group "
+            "(e.g. gitlab.com/my-group). A repository uses its group's token when there is one, else its host's."))
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.NoFrame)
@@ -324,7 +621,8 @@ class SettingsDialog(QDialog):
 
         add = QHBoxLayout()
         self.add_host_edit = QLineEdit()
-        self.add_host_edit.setPlaceholderText("Add a host manually (e.g. git.example.com)")
+        self.add_host_edit.setPlaceholderText("Add a host (git.example.com) or a group with its own account "
+                                              "(gitlab.com/my-group)")
         add_btn = QPushButton("Add")
         add_btn.clicked.connect(self._add_host)
         self.add_host_edit.returnPressed.connect(self._add_host)
@@ -351,10 +649,11 @@ class SettingsDialog(QDialog):
             self._ensure_host(host)
 
     def _add_host(self):
-        host = self.add_host_edit.text().strip().lower()
-        if "//" in host:
-            host = parse_url(host)[0]
-        self._ensure_host(host.strip("/"))
+        text = self.add_host_edit.text().strip().lower()
+        if "//" in text:  # a pasted link: its host and top-level group
+            host, parts = parse_url(text.split("/-/", 1)[0])
+            text = f"{host}/{parts[0]}" if parts else host
+        self._ensure_host(text.strip("/"))
         self.add_host_edit.clear()
 
     def accept(self):
@@ -382,6 +681,9 @@ class SettingsDialog(QDialog):
         self.config.base_branches = [b.strip() for b in self.base_edit.text().split(",") if b.strip()]
         self.config.auto_fetch_minutes = self.fetch_spin.value()
         self.config.watch_files = self.watch_cb.isChecked()
+        vault.set_scopes(self.config.hosts)
+        self.config.ai_commit_model = self._model_of(self.commit_model)
+        self.config.ai_review_model = self._model_of(self.review_model)
         self.config.repos = urls
         if self.unhide:
             self.config.hidden = []

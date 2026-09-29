@@ -218,8 +218,7 @@ class RepoSettingsDialog(QDialog):
         if not url:
             return
         self._show(None, "Testing…")
-        host = parse_url(url)[0]
-        cred = self.main.creds.get(host) if git_ops.is_http(url) else None
+        cred = self.main.cred_for_url(url)
 
         def done(result, err):
             try:

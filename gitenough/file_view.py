@@ -113,11 +113,29 @@ class _Delegate(QStyledItemDelegate):
         if fc.orig:
             folder = f"from {fc.orig}" if self.view.tree_mode else f"{fc.orig}  →  {folder or '.'}"
         x = badge.right() + 10
+        right = r.right() - 6
+        pill = self.view.badges.get(fc.path)
+        if pill:
+            small = QFont(option.font)
+            small.setPointSizeF(7.5)
+            small.setBold(True)
+            p.setFont(small)
+            w = p.fontMetrics().horizontalAdvance(pill[0]) + 12
+            box = QRectF(right - w, r.center().y() - 8, w, 16)
+            tint = QColor(pill[1])
+            tint.setAlpha(46)
+            p.setPen(Qt.NoPen)
+            p.setBrush(tint)
+            p.drawRoundedRect(box, 8, 8)
+            p.setPen(QColor(pill[1]))
+            p.drawText(box, Qt.AlignCenter, pill[0])
+            right = box.left() - 6
         font = QFont(option.font)
         font.setWeight(QFont.DemiBold)
         p.setFont(font)
-        p.setPen(QColor(C["text"]))
-        text_rect = QRectF(x, r.top(), r.right() - x - 6, r.height())
+        dim = self.view.dim_checked and self.view.checks is not None and fc.path in self.view.checks
+        p.setPen(QColor(C["faint"] if dim else C["text"]))
+        text_rect = QRectF(x, r.top(), right - x, r.height())
         fm = p.fontMetrics()
         shown = fm.elidedText(name, Qt.ElideMiddle, int(text_rect.width()))
         p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, shown)
@@ -143,6 +161,8 @@ class FileView(QTreeWidget):
         self.tree_mode = tree_mode
         # Checked paths, shared with the owner (which updates it on check_toggled); None: no check boxes.
         self.checks: set[str] | None = None
+        self.badges: dict[str, tuple[str, str]] = {}  # path -> (text, color) drawn at the row's right
+        self.dim_checked = False  # checked rows drawn muted (files marked as viewed)
         self.files: list[FileChange] = []
         self._collapsed: set[str] = set()
         self.setObjectName("fileView")
@@ -288,6 +308,20 @@ class FileView(QTreeWidget):
         item = self.currentItem()
         data = item.data(0, Qt.UserRole) if item else None
         return data if isinstance(data, FileChange) else None
+
+    def select_path(self, path: str) -> bool:
+        """Make a file current without rebuilding the list (a rebuild of 400 rows costs ~15 ms)."""
+        item = next((it for it in self._file_items() if it.data(0, Qt.UserRole).path == path), None)
+        if item is None:
+            return False
+        self.blockSignals(True)
+        self.clearSelection()
+        self.setCurrentItem(item)
+        item.setSelected(True)
+        self.blockSignals(False)
+        self.scrollToItem(item)
+        self.viewport().update()
+        return True
 
     def select_first(self) -> bool:
         first = next(self._file_items(), None)

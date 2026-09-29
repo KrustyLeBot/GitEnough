@@ -7,14 +7,15 @@ from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
-from . import rebase, repo
+from . import ai, rebase, repo
+from .config import Config
 from .diff_view import DiffView, parse_diff
 from .errors import explain
 from .file_view import ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
 from .repo import FileChange
 from .style import C
-from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
+from .widgets import ElidedLabel, ErrorDialog, ai_error_dialog, icon_button, keep_size
 
 
 def _load_diff(path: str, fc: FileChange, ws: bool, full: bool):
@@ -272,8 +273,20 @@ class ChangesWindow(QWidget):
         self.message.setPlaceholderText("Commit message  (Ctrl+Enter to commit)")
         self.message.setFixedHeight(84)
         self.message.textChanged.connect(self.update_buttons)
+        # The draft (typed or suggested by Claude) outlives the window: it comes back at the next opening.
+        self.message.setPlainText(Config.load_draft(self.path))
+        self.draft_timer = QTimer(self, singleShot=True, interval=600)
+        self.draft_timer.timeout.connect(lambda: Config.save_draft(self.path, self.message.toPlainText()))
+        self.message.textChanged.connect(self.draft_timer.start)
         lay.addWidget(self.message)
         buttons = QHBoxLayout()
+        self.suggest_btn = QPushButton("✨ Suggest")
+        self.suggest_btn.setToolTip("Write a commit message from the staged changes with Claude "
+                                    f"({self.main.config.ai_commit_model or 'default model'}, "
+                                    "through your Claude Code sign-in)")
+        self.suggest_btn.clicked.connect(self.suggest_message)
+        self.suggest_btn.setVisible(ai.find_cli() is not None)
+        buttons.addWidget(self.suggest_btn)
         self.commit_btn = QPushButton("Commit")
         self.commit_btn.setObjectName("primary")
         self.commit_btn.clicked.connect(lambda: self.do_commit(False))
@@ -592,6 +605,40 @@ class ChangesWindow(QWidget):
         self.refresh()
         self.changed.emit()
 
+    def suggest_message(self):
+        if self.busy or not self.staged:
+            return
+        model = self.main.config.ai_commit_model
+        self.suggest_btn.setEnabled(False)
+        self.status.setText(f"Asking Claude ({model or 'default model'}) for a commit message…")
+        self.ai_handle = ai.Handle()
+        path = self.path
+
+        def done(text, error):
+            if text and not error:
+                Config.save_draft(path, text)  # kept even when this window is closed meanwhile
+            try:
+                self._on_suggestion(text, error)
+            except RuntimeError:
+                pass  # window closed before Claude answered: the draft waits for the next opening
+
+        self.tasks.submit_ai(ai.commit_message, done, path, model, self.ai_handle)
+
+    def _on_suggestion(self, text, error):
+        self.suggest_btn.setEnabled(True)
+        self.update_buttons()
+        if error:
+            self.status.setText("")
+            ai_error_dialog(self, str(error))
+            return
+        used = ", ".join(getattr(self, "ai_handle", None) and self.ai_handle.models or []) or "Claude"
+        self.status.setText(f"Suggested by {used}: edit it before committing if needed")
+        # Through the cursor, so Ctrl+Z brings back what was typed before.
+        cursor = self.message.textCursor()
+        cursor.select(cursor.SelectionType.Document)
+        cursor.insertText(text)
+        self.message.setFocus()
+
     def do_commit(self, then_push: bool):
         msg = self.message.toPlainText().strip()
         if self.busy or not msg or not self.staged:
@@ -602,6 +649,8 @@ class ChangesWindow(QWidget):
     def _on_commit(self, sha, error, then_push: bool):
         if not error:
             self.message.clear()
+            self.draft_timer.stop()
+            Config.save_draft(self.path, "")
         self._after(error, "Commit", f"Committed {sha}" if not error else "")
         if not error and then_push:
             self.main.push_project(self.p)
@@ -614,6 +663,8 @@ class ChangesWindow(QWidget):
     def update_buttons(self):
         ok = bool(self.staged) and bool(self.message.toPlainText().strip()) and not self.busy
         self.commit_btn.setEnabled(ok)
+        if hasattr(self, "suggest_btn"):
+            self.suggest_btn.setEnabled(bool(self.staged) and not self.busy)
         self.commit_push_btn.setEnabled(ok)
         n = len(self.staged)
         self.commit_btn.setText(f"Commit {n} file{'s' if n != 1 else ''}" if n else "Commit")
@@ -656,6 +707,12 @@ class ChangesWindow(QWidget):
             act.triggered.connect(fn)
             menu.addAction(act)
         menu.exec(view.viewport().mapToGlobal(pos))
+
+    def closeEvent(self, event):
+        if self.draft_timer.isActive():
+            self.draft_timer.stop()
+            Config.save_draft(self.path, self.message.toPlainText())
+        super().closeEvent(event)
 
     def changeEvent(self, event):
         # Files edited in another app while this window was in the background.

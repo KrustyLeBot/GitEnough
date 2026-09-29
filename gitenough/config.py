@@ -6,6 +6,7 @@ from pathlib import Path
 APP_NAME = "GitEnough"
 CONFIG_DIR = Path(os.environ.get("APPDATA") or Path.home()) / APP_NAME
 CONFIG_PATH = CONFIG_DIR / "config.json"
+DRAFTS_PATH = CONFIG_DIR / "drafts.json"
 # The app was first released as GitTracker: its configuration is picked up once.
 LEGACY_CONFIG_PATH = Path(os.environ.get("APPDATA") or Path.home()) / "GitTracker" / "config.json"
 
@@ -31,6 +32,36 @@ class Config:
     geometry: str = ""
     # window kind ("changes", "history", ...) -> [width, height, maximized], restored when one opens
     window_sizes: dict[str, list] = field(default_factory=dict)
+    # Claude Code CLI models ("haiku", "sonnet", a full model name, or "" for the CLI's default)
+    ai_commit_model: str = "haiku"
+    ai_review_model: str = "sonnet"
+    mr_links: list[str] = field(default_factory=list)  # merge requests added by URL
+    review_skill_source: str = ""  # GitLab project whose CI artifacts hold .skill files
+    review_skill: str = ""  # name of the skill installed from it for the AI review ("" = built-in method)
+
+    # ---------- commit message drafts, per repository folder (typed or suggested by Claude) ----------
+    @staticmethod
+    def load_draft(repo: str) -> str:
+        try:
+            return json.loads(DRAFTS_PATH.read_text("utf-8")).get(os.path.normcase(repo), "")
+        except (OSError, ValueError):
+            return ""
+
+    @staticmethod
+    def save_draft(repo: str, text: str) -> None:
+        try:
+            drafts = json.loads(DRAFTS_PATH.read_text("utf-8"))
+        except (OSError, ValueError):
+            drafts = {}
+        key = os.path.normcase(repo)
+        if text.strip():
+            drafts[key] = text
+        else:
+            drafts.pop(key, None)
+        CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+        tmp = DRAFTS_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(drafts, indent=1), "utf-8")
+        os.replace(tmp, DRAFTS_PATH)
 
     @classmethod
     def load(cls) -> "Config":

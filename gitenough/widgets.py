@@ -4,7 +4,7 @@ from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
 from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
                                QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
-                               QToolButton, QVBoxLayout)
+                               QToolButton, QVBoxLayout, QWidget)
 
 from .errors import Explained
 from .repo import FileChange
@@ -449,3 +449,50 @@ def keep_size(win, config, kind: str, persist: bool = True) -> None:
             win.setWindowState(win.windowState() | Qt.WindowMaximized)
     _SizeKeeper(win, config, kind, persist)
 
+
+
+def ai_error_dialog(parent, text: str, title: str = "Claude") -> None:
+    """A Claude Code failure, with a sign-in button when that is what is missing."""
+    from . import ai
+
+    box = QMessageBox(QMessageBox.Warning, title, text, QMessageBox.Close, parent)
+    sign_in = None
+    if "not signed in" in text or "auth login" in text:
+        sign_in = box.addButton("Sign in to Claude", QMessageBox.AcceptRole)
+    elif "not installed" in text:
+        box.setTextFormat(Qt.MarkdownText)
+    box.exec()
+    if sign_in is not None and box.clickedButton() is sign_in:
+        ai.open_login()
+
+
+class Spinner(QWidget):
+    """Small turning arc shown while something loads; it only animates while visible."""
+
+    def __init__(self, size: int = 16, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.angle = 0
+        self.timer = QTimer(self, interval=50)
+        self.timer.timeout.connect(self._step)
+
+    def _step(self):
+        self.angle = (self.angle + 30) % 360
+        self.update()
+
+    def showEvent(self, event):
+        self.timer.start()
+        super().showEvent(event)
+
+    def hideEvent(self, event):
+        self.timer.stop()
+        super().hideEvent(event)
+
+    def paintEvent(self, _event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+        pen = QPen(QColor(C["accent"]), 2.2)
+        pen.setCapStyle(Qt.RoundCap)
+        p.setPen(pen)
+        r = QRectF(2, 2, self.width() - 4, self.height() - 4)
+        p.drawArc(r, -self.angle * 16, 270 * 16)
