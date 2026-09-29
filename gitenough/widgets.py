@@ -1,7 +1,7 @@
 from functools import lru_cache
 
-from PySide6.QtCore import QEvent, QPointF, QRectF, QSize, Qt
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtCore import QEvent, QObject, QPointF, QRectF, QSize, Qt, QTimer
+from PySide6.QtGui import QColor, QFont, QGuiApplication, QIcon, QPainter, QPainterPath, QPen, QPixmap
 from PySide6.QtWidgets import (QAbstractScrollArea, QApplication, QComboBox, QDialog, QHBoxLayout, QLabel, QListWidget,
                                QMessageBox, QPlainTextEdit, QPushButton, QSizePolicy, QStyle, QStyledItemDelegate,
                                QToolButton, QVBoxLayout)
@@ -375,3 +375,60 @@ class ErrorDialog(QDialog):
             retry.setDefault(True)
         lay.addWidget(self.raw)
         lay.addLayout(buttons)
+
+
+class _SizeKeeper(QObject):
+    """Saves a window's size under its kind whenever the user resizes it."""
+
+    def __init__(self, win, config, kind: str, persist: bool):
+        super().__init__(win)
+        self.win, self.config, self.kind, self.persist = win, config, kind, persist
+        self.timer = QTimer(self, singleShot=True, interval=600)  # one save per drag, not per pixel
+        self.timer.timeout.connect(self.save)
+        win.installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        if obj is self.win:
+            kind = event.type()
+            if kind in (QEvent.Resize, QEvent.WindowStateChange) and obj.isVisible():
+                self.timer.start()
+            elif kind in (QEvent.Close, QEvent.Hide) and self.timer.isActive():
+                self.timer.stop()
+                self.save()
+        return False
+
+    def save(self):
+        win = self.win
+        if win.isMinimized() or win.isFullScreen():
+            return
+        maximized = win.isMaximized()
+        # Maximized: keep the size it goes back to, not the screen size.
+        size = win.normalGeometry().size() if maximized else win.size()
+        old = self.config.window_sizes.get(self.kind)
+        if maximized and (not size.isValid() or size.isEmpty()):
+            size = QSize(old[0], old[1]) if old else win.size()
+        entry = [size.width(), size.height(), maximized]
+        if entry != old:
+            self.config.window_sizes[self.kind] = entry
+            if self.persist:
+                self.config.save()
+
+
+def keep_size(win, config, kind: str, persist: bool = True) -> None:
+    """Open win at the size the last window of this kind had, and remember its future resizes.
+
+    Call after the default resize() and before show(). persist=False only records the size in memory,
+    for windows editing a config whose unsaved changes must not reach the disk.
+    """
+    entry = config.window_sizes.get(kind)
+    if entry and len(entry) >= 2:
+        screen = QGuiApplication.primaryScreen()
+        area = screen.availableGeometry() if screen else None
+        w, h = int(entry[0]), int(entry[1])
+        if area is not None:  # A smaller screen than last time: never open larger than it.
+            w, h = min(w, area.width()), min(h, area.height())
+        win.resize(max(w, 300), max(h, 200))
+        if len(entry) > 2 and entry[2]:
+            win.setWindowState(win.windowState() | Qt.WindowMaximized)
+    _SizeKeeper(win, config, kind, persist)
+

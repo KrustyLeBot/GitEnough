@@ -2,7 +2,7 @@
 
 from collections import Counter
 
-from PySide6.QtCore import QEvent, QItemSelectionModel, QRectF, QSize, Qt, Signal
+from PySide6.QtCore import QEvent, QItemSelectionModel, QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QAbstractItemView, QLabel, QStyle, QStyledItemDelegate, QStyleOptionViewItem,
                                QTreeWidget, QTreeWidgetItem)
@@ -24,6 +24,7 @@ def extension(path: str) -> str:
 
 class _Delegate(QStyledItemDelegate):
     ROW = 28
+    BOX = 14  # check box size, when the view has check boxes
 
     def __init__(self, view: "FileView"):
         super().__init__(view)
@@ -45,11 +46,31 @@ class _Delegate(QStyledItemDelegate):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(C["hover"]))
             p.drawRoundedRect(r, 6, 6)
+        if self.view.checks is not None:
+            state = self.view.check_state(self.view.itemFromIndex(index))
+            self._paint_check(p, QRectF(r.left() + 6, r.center().y() - self.BOX / 2, self.BOX, self.BOX), state)
+            r = r.adjusted(self.BOX + 6, 0, 0, 0)
         if isinstance(data, tuple) and data[0] == DIR:
             self._paint_dir(p, option, r, index, data)
         elif isinstance(data, FileChange):
             self._paint_file(p, option, r, data)
         p.restore()
+
+    @staticmethod
+    def _paint_check(p, box: QRectF, state):
+        on = state != Qt.Unchecked
+        p.setPen(QPen(QColor(C["accent"] if on else "#3a4150"), 1.4))
+        p.setBrush(QColor(C["accent"] if state == Qt.Checked else C["surface"]))
+        p.drawRoundedRect(box, 4, 4)
+        if state == Qt.Checked:
+            p.setPen(QPen(QColor("#0b0d12"), 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            x, y, s = box.left(), box.top(), box.width()
+            p.drawPolyline([QPointF(x + s * 0.25, y + s * 0.52), QPointF(x + s * 0.43, y + s * 0.70),
+                            QPointF(x + s * 0.76, y + s * 0.32)])
+        elif state == Qt.PartiallyChecked:
+            p.setPen(Qt.NoPen)
+            p.setBrush(QColor(C["accent"]))
+            p.drawRoundedRect(box.adjusted(4, 4, -4, -4), 1.5, 1.5)
 
     def _paint_dir(self, p, option, r, index, data):
         _, path, count = data
@@ -115,10 +136,13 @@ class FileView(QTreeWidget):
     selection_changed = Signal()
     activated = Signal(list)  # double-click / Space / Enter on files
     delete_pressed = Signal(list)
+    check_toggled = Signal(list, bool)  # files under the clicked box, new state
 
     def __init__(self, tree_mode: bool = False, parent=None):
         super().__init__(parent)
         self.tree_mode = tree_mode
+        # Checked paths, shared with the owner (which updates it on check_toggled); None: no check boxes.
+        self.checks: set[str] | None = None
         self.files: list[FileChange] = []
         self._collapsed: set[str] = set()
         self.setObjectName("fileView")
@@ -284,7 +308,34 @@ class FileView(QTreeWidget):
             self.setCurrentItem(item)
         return self.selected_files()
 
+    def check_state(self, item):
+        files = self._files_under(item)
+        hits = sum(1 for f in files if f.path in self.checks)
+        return Qt.Unchecked if not hits else Qt.Checked if hits == len(files) else Qt.PartiallyChecked
+
     # ---------- input ----------
+    def _box_item(self, pos):
+        """The item whose check box is under pos, else None."""
+        item = self.itemAt(pos)
+        if self.checks is None or item is None:
+            return None
+        left = self.visualItemRect(item).left() + 2
+        return item if left + 2 <= pos.x() <= left + 8 + _Delegate.BOX + 2 else None
+
+    def mousePressEvent(self, event):
+        item = self._box_item(event.position().toPoint())
+        if item is not None and event.button() == Qt.LeftButton:
+            # Checking is independent from selection: the diff on screen stays.
+            self.check_toggled.emit(self._files_under(item), self.check_state(item) != Qt.Checked)
+            return
+        super().mousePressEvent(event)
+
+    def mouseDoubleClickEvent(self, event):
+        if self._box_item(event.position().toPoint()) is not None:
+            self.mousePressEvent(event)  # A fast second click is a second toggle, not a stage.
+            return
+        super().mouseDoubleClickEvent(event)
+
     def _double_clicked(self, item, _col):
         data = item.data(0, Qt.UserRole)
         if isinstance(data, FileChange):

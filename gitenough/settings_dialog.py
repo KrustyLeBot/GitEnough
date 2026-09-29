@@ -11,6 +11,7 @@ from .config import Config
 from .git_ops import Credential, GitError, is_http, parse_url, same_repo, test_access
 from .style import C
 from .tasks import Tasks
+from .widgets import keep_size
 
 
 def parse_repo_lines(text: str) -> list[str]:
@@ -127,6 +128,7 @@ class SettingsDialog(QDialog):
         self.host_rows: dict[str, HostRow] = {}
         self.setWindowTitle("Settings")
         self.resize(760, 560)
+        keep_size(self, self.config, "settings", persist=False)  # Saved with the form, or at exit.
 
         root = QVBoxLayout(self)
         root.setContentsMargins(20, 20, 20, 16)

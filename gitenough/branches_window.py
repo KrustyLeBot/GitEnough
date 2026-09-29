@@ -12,7 +12,7 @@ from .errors import explain
 from .repo import Branch
 from .style import C
 from .tree_window import rel_time
-from .widgets import ElidedLabel, ErrorDialog, icon_button
+from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
 
 
 class NewBranchDialog(QDialog):
@@ -119,6 +119,7 @@ class BranchesWindow(QWidget):
 
         self.setWindowTitle(f"Branches · {project.name}")
         self.resize(1200, 760)
+        keep_size(self, self.main.config, "branches")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)

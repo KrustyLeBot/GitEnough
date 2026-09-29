@@ -4,8 +4,8 @@ import time
 
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox, QPlainTextEdit,
-                               QPushButton, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+                               QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget)
 
 from . import rebase, repo
 from .diff_view import DiffView, parse_diff
@@ -14,7 +14,7 @@ from .file_view import ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
 from .repo import FileChange
 from .style import C
-from .widgets import ElidedLabel, ErrorDialog, icon_button
+from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
 
 
 def _load_diff(path: str, fc: FileChange, ws: bool, full: bool):
@@ -51,6 +51,60 @@ def tree_toggle(main, views: list[FileView]):
     return btn
 
 
+class StashFilesDialog(QDialog):
+    """Asks for a message and whether the stashed files also stay in the working folder."""
+
+    def __init__(self, parent, files: list[FileChange]):
+        super().__init__(parent)
+        self.keep = False
+        paths = sorted({f.path for f in files}, key=str.lower)
+        new = len({f.path for f in files if f.code in "?A"})
+        self.setWindowTitle("Stash files")
+        self.setMinimumWidth(480)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(20, 18, 20, 16)
+        lay.setSpacing(8)
+        head = QLabel(f"Stash {len(paths)} file{'s' if len(paths) != 1 else ''}")
+        head.setStyleSheet("font-size: 12pt; font-weight: 700;")
+        lay.addWidget(head)
+        names = QLabel("\n".join(paths[:12]) + (f"\n… and {len(paths) - 12} more" if len(paths) > 12 else ""))
+        names.setObjectName("muted")
+        names.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        lay.addWidget(names)
+        note = QLabel("Everything in these files goes into the stash: staged and unstaged changes"
+                      + (f", and the {new} new file{'s' if new != 1 else ''}" if new else "")
+                      + ". Other files are not touched. Applying the stash later brings them back, "
+                        "staged parts staged again.")
+        note.setWordWrap(True)
+        lay.addWidget(note)
+        lay.addSpacing(4)
+        lay.addWidget(QLabel("Message (optional)"))
+        self.message = QLineEdit()
+        self.message.setPlaceholderText("e.g. WIP login form")
+        lay.addWidget(self.message)
+        lay.addSpacing(6)
+        row = QHBoxLayout()
+        row.addStretch()
+        cancel = QPushButton("Cancel")
+        cancel.clicked.connect(self.reject)
+        keep = QPushButton("Stash, keep my changes")
+        keep.setToolTip("Save a copy in a stash and leave these files as they are")
+        keep.clicked.connect(lambda: self._done(True))
+        revert = QPushButton("Stash and revert files")
+        revert.setObjectName("primary")
+        revert.setDefault(True)
+        revert.setToolTip("Move the changes into a stash: these files go back to the last commit"
+                          + (", new files are removed" if new else ""))
+        revert.clicked.connect(lambda: self._done(False))
+        for b in (cancel, keep, revert):
+            row.addWidget(b)
+        lay.addLayout(row)
+
+    def _done(self, keep: bool):
+        self.keep = keep
+        self.accept()
+
+
 class ChangesWindow(QWidget):
     """Staged / unstaged files of one repository, with diff, stage, discard, ignore and commit."""
 
@@ -68,11 +122,13 @@ class ChangesWindow(QWidget):
         self.content_hits: set | None = None
         self.search_gen = 0
         self.ext = ""  # extension filter from the extension bars
+        self.checked: set[str] = set()  # paths ticked for a stash, in either list
         self.busy = False
         self.last_refresh = 0.0
 
         self.setWindowTitle(f"Changes · {project.name}")
         self.resize(1440, 860)
+        keep_size(self, self.main.config, "changes")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -155,6 +211,7 @@ class ChangesWindow(QWidget):
         lay.addLayout(row)
 
         self.staged_title, staged_head = self._section("Staged")
+        self.staged_all = self._check_all(self.staged_view, staged_head)
         unstage_sel = QPushButton("Unstage")
         unstage_sel.setToolTip("Unstage selected files or folders (Space)")
         unstage_sel.clicked.connect(lambda: self.unstage(self.staged_view.selected_files()))
@@ -171,6 +228,7 @@ class ChangesWindow(QWidget):
 
         lay.addSpacing(4)
         self.unstaged_title, unstaged_head = self._section("Changes")
+        self.unstaged_all = self._check_all(self.unstaged_view, unstaged_head)
         stage_sel = QPushButton("Stage")
         stage_sel.setToolTip("Stage selected files or folders (Space)")
         stage_sel.clicked.connect(lambda: self.stage(self.unstaged_view.selected_files()))
@@ -188,9 +246,26 @@ class ChangesWindow(QWidget):
         lay.addWidget(self.unstaged_ext)
         lay.addWidget(self.unstaged_view, 3)
 
-        hint = QLabel("Double-click or Space to stage / unstage · right-click to ignore")
+        hint = QLabel("Double-click or Space to stage / unstage · right-click to ignore · tick to stash")
         hint.setObjectName("muted")
         lay.addWidget(hint)
+
+        self.stash_bar = QWidget()
+        bar = QHBoxLayout(self.stash_bar)
+        bar.setContentsMargins(0, 2, 0, 2)
+        self.stash_count = QLabel("")
+        clear = QPushButton("Clear")
+        clear.setObjectName("rowAction")
+        clear.setToolTip("Untick every file")
+        clear.clicked.connect(lambda: self.set_checked(list(self.checked), False))
+        self.stash_btn = QPushButton("Stash…")
+        self.stash_btn.setObjectName("primary")
+        self.stash_btn.clicked.connect(self.stash_checked)
+        bar.addWidget(self.stash_count, 1)
+        bar.addWidget(clear)
+        bar.addWidget(self.stash_btn)
+        self.stash_bar.hide()
+        lay.addWidget(self.stash_bar)
 
         self.message = QPlainTextEdit()
         self.message.setObjectName("commitMessage")
@@ -220,8 +295,23 @@ class ChangesWindow(QWidget):
         head.addStretch()
         return label, head
 
+    def _check_all(self, view: FileView, head: QHBoxLayout) -> QCheckBox:
+        box = QCheckBox()
+        box.setToolTip("Tick every file of this list (for a stash)")
+        box.setFocusPolicy(Qt.NoFocus)
+        # Partly ticked: a click ticks the rest; fully ticked: it unticks all.
+        box.clicked.connect(lambda _on, v=view: self.set_checked([f.path for f in v.files],
+                                                                   not self._all_checked(v)))
+        head.insertWidget(0, box)
+        return box
+
+    def _all_checked(self, view: FileView) -> bool:
+        return bool(view.files) and all(f.path in self.checked for f in view.files)
+
     def _make_view(self) -> FileView:
         view = FileView(self.main.config.file_tree)
+        view.checks = self.checked
+        view.check_toggled.connect(lambda files, on: self.set_checked([f.path for f in files], on))
         view.selection_changed.connect(lambda v=view: self.on_selection(v))
         view.activated.connect(lambda files, v=view: self.toggle(v, files))
         view.delete_pressed.connect(lambda files, v=view: v is self.unstaged_view and self.discard(files))
@@ -244,6 +334,8 @@ class ChangesWindow(QWidget):
         if result == (self.staged, self.unstaged):
             return  # Nothing changed: leave lists, selection and diff alone.
         self.staged, self.unstaged = result
+        # Files committed, discarded or stashed elsewhere drop out of the ticked set.
+        self.checked.intersection_update({f.path for f in self.staged + self.unstaged})
         self.diff_cache.clear()
         self.content_hits = None
         if self.in_content.isChecked() and self.search.text().strip():
@@ -285,6 +377,7 @@ class ChangesWindow(QWidget):
                 self.diff.set_message("No changes: working tree clean" if not all_files
                                       else "No file matches the filters")
         self.update_buttons()
+        self.update_checks()
 
     @staticmethod
     def _title(name: str, shown: int, total: int) -> str:
@@ -363,6 +456,52 @@ class ChangesWindow(QWidget):
         term = self.search.text().strip()
         if term and self.in_content.isChecked():
             self.diff.set_find(term)
+
+    # ---------- stash of ticked files ----------
+    def set_checked(self, paths: list[str], on: bool):
+        if on:
+            self.checked.update(paths)
+        else:
+            self.checked.difference_update(paths)
+        self.update_checks()
+
+    def update_checks(self):
+        for view in (self.staged_view, self.unstaged_view):
+            view.viewport().update()
+        for view, box in ((self.staged_view, self.staged_all), (self.unstaged_view, self.unstaged_all)):
+            hits = sum(1 for f in view.files if f.path in self.checked)
+            box.setEnabled(bool(view.files))
+            box.setCheckState(Qt.Unchecked if not hits else Qt.Checked if hits == len(view.files)
+                              else Qt.PartiallyChecked)
+        n = len(self.checked)
+        self.stash_bar.setVisible(bool(n))
+        self.stash_count.setText(f"{n} file{'s' if n != 1 else ''} ticked")
+        self.stash_btn.setText(f"Stash {n} file{'s' if n != 1 else ''}…")
+        self.stash_btn.setEnabled(bool(n) and not self.busy)
+
+    def stash_checked(self):
+        files = [f for f in self.staged + self.unstaged if f.path in self.checked]
+        if self.busy or not files:
+            return
+        conflicts = sorted({f.path for f in files if f.code == "U"})
+        if conflicts:
+            QMessageBox.warning(self, "Stash files", "Files with merge conflicts cannot be stashed:\n\n"
+                                + "\n".join(conflicts[:12]) + "\n\nResolve them first, or untick them.")
+            return
+        dialog = StashFilesDialog(self, files)
+        if not dialog.exec():
+            return
+        n, keep = len({f.path for f in files}), dialog.keep
+        plural = "s" if n != 1 else ""
+        self.set_busy(True, f"Stashing {n} file{plural}…")
+
+        def done(_sha, err):
+            if not err:
+                self.checked.clear()
+            self._after(err, "Stash files", "" if err else
+                        f"Stashed {n} file{plural}, " + ("changes kept" if keep else "files reverted"))
+
+        self.tasks.submit(repo.stash_selected, done, self.path, files, dialog.message.text().strip(), keep)
 
     # ---------- actions ----------
     def toggle(self, view: FileView, files: list[FileChange]):
@@ -478,6 +617,8 @@ class ChangesWindow(QWidget):
         self.commit_push_btn.setEnabled(ok)
         n = len(self.staged)
         self.commit_btn.setText(f"Commit {n} file{'s' if n != 1 else ''}" if n else "Commit")
+        if hasattr(self, "stash_btn"):
+            self.stash_btn.setEnabled(bool(self.checked) and not self.busy)
 
     def context_menu(self, view: FileView, pos):
         files = view.item_files_at(pos)

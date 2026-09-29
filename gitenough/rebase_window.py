@@ -12,7 +12,7 @@ from . import git_ops, rebase
 from .errors import explain
 from .style import C
 from .tree_window import rel_time
-from .widgets import ElidedLabel, ErrorDialog, icon_button
+from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
 
 
 def _box(text: str, color: str) -> QLabel:
@@ -40,6 +40,7 @@ class RebaseWindow(QWidget):
         self.busy = False
         self.setWindowTitle(f"Rebase onto · {project.title or project.name}")
         self.resize(1180, 820)
+        keep_size(self, self.main.config, "rebase")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)

@@ -14,7 +14,7 @@ from .repo import FileChange, Stash
 from .style import C
 from .tree_window import rel_time
 from .file_view import ExtensionBar, FileView, extension
-from .widgets import ElidedLabel, ErrorDialog, icon_button
+from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
 
 
 class StashDelegate(QStyledItemDelegate):
@@ -67,6 +67,9 @@ class StashNowDialog(QDialog):
         self.untracked = QCheckBox("Include untracked files")
         self.untracked.setChecked(True)
         lay.addWidget(self.untracked)
+        hint = QLabel("To stash some files only, tick them in the Changes window.")
+        hint.setObjectName("muted")
+        lay.addWidget(hint)
         row = QHBoxLayout()
         row.addStretch()
         cancel = QPushButton("Cancel")
@@ -97,6 +100,7 @@ class StashWindow(QWidget):
 
         self.setWindowTitle(f"Stashes · {project.name}")
         self.resize(1360, 780)
+        keep_size(self, self.main.config, "stashes")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)

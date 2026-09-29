@@ -83,6 +83,7 @@ QCheckBox::indicator {{ width: 17px; height: 17px; border-radius: 5px; border: 1
 QCheckBox::indicator:hover {{ border-color: {C['accent']}; }}
 QCheckBox::indicator:checked {{ background: {C['accent']}; border-color: {C['accent']};
                                 image: url(:/check.png); }}
+QCheckBox::indicator:indeterminate {{ border-color: {C['accent']}; background: #343d78; }}
 
 QTableWidget {{ background: {C['surface']}; border: 1px solid {C['border']}; border-radius: 12px;
                 gridline-color: transparent; outline: none; }}

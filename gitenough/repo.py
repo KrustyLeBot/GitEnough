@@ -2,6 +2,8 @@
 
 import os
 import re
+import shutil
+import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -374,6 +376,81 @@ def stash_drop(path: str, st: Stash) -> None:
 def stash_push(path: str, message: str, untracked: bool) -> None:
     args = ["stash", "push"] + (["--include-untracked"] if untracked else [])
     run_git(args + (["-m", message] if message else []), cwd=path, timeout=120)
+
+
+ZERO_SHA = "0" * 40
+
+
+def stash_selected(path: str, files: list[FileChange], message: str, keep: bool) -> str:
+    """Stash exactly the given files (staged, unstaged and untracked changes alike); returns the stash sha.
+
+    Built with plumbing instead of `git stash push -- <paths>`, which half-fails on renames (stash saved,
+    files left in place) and whose untracked handling depends on flags. The commits have the layout of a
+    regular stash, so `stash apply --index` restores staged and unstaged parts as they were.
+    keep=False then puts those files back to HEAD; keep=True leaves the working folder untouched.
+    """
+    if any(f.code == "U" for f in files):
+        raise GitError("Files with merge conflicts cannot be stashed. Resolve them first.")
+    try:
+        head = run_git(["rev-parse", "--verify", "-q", "HEAD"], cwd=path, timeout=15).strip()
+    except GitError as exc:
+        raise GitError("The repository has no commit yet: there is nothing to stash against.") from exc
+    try:
+        branch = run_git(["symbolic-ref", "--short", "-q", "HEAD"], cwd=path, timeout=15).strip()
+    except GitError:
+        branch = "(no branch)"
+    subject = run_git(["log", "-1", "--format=%h %s", head], cwd=path, timeout=15).strip()
+    untracked = sorted({f.path for f in files if f.code == "?"})
+    tracked = sorted({p for f in files if f.code != "?" for p in (f.path, f.orig) if p})
+
+    wanted = set(tracked)
+    index: dict[str, str] = {}  # path -> "mode sha" of its stage-0 entry in the real index
+    for entry in run_git(["ls-files", "-s", "-z"], cwd=path, timeout=60).split("\0"):
+        meta, _, name = entry.partition("\t")
+        parts = meta.split()
+        if name in wanted and len(parts) == 3 and parts[2] == "0":
+            index[name] = f"{parts[0]} {parts[1]}"
+    in_index = [p for p in tracked if p in index]
+
+    def commit(tree: str, parents: list[str], text: str) -> str:
+        args = ["commit-tree", tree, *[a for p in parents for a in ("-p", p)], "-m", text]
+        return run_git(args, cwd=path, timeout=30).strip()
+
+    temp = tempfile.mkdtemp(prefix="gitenough-stash-")
+    try:
+        env = {"GIT_INDEX_FILE": os.path.join(temp, "index")}
+        # Index commit: HEAD, with the selected paths as they are staged.
+        run_git(["read-tree", head], cwd=path, timeout=60, env_extra=env)
+        info = "".join(f"{index[p]} 0\t{p}\0" if p in index else f"0 {ZERO_SHA} 0\t{p}\0" for p in tracked)
+        run_git(["update-index", "-z", "--index-info"], cwd=path, timeout=60, env_extra=env,
+                stdin=info.encode("utf-8"))
+        i_commit = commit(run_git(["write-tree"], cwd=path, timeout=60, env_extra=env).strip(), [head],
+                          f"index on {branch}: {subject}")
+        # Working tree commit: the index commit plus what the selected tracked files contain on disk.
+        if in_index:
+            run_git(["update-index", "--add", "--remove", "-z", "--stdin"], cwd=path, timeout=300,
+                    env_extra=env, stdin="\0".join(in_index).encode("utf-8"))
+        w_tree = run_git(["write-tree"], cwd=path, timeout=60, env_extra=env).strip()
+        parents = [head, i_commit]
+        if untracked:
+            env = {"GIT_INDEX_FILE": os.path.join(temp, "untracked")}
+            run_git(["update-index", "--add", "-z", "--stdin"], cwd=path, timeout=300, env_extra=env,
+                    stdin="\0".join(untracked).encode("utf-8"))
+            u_tree = run_git(["write-tree"], cwd=path, timeout=60, env_extra=env).strip()
+            parents.append(commit(u_tree, [], f"untracked files on {branch}: {subject}"))
+    finally:
+        shutil.rmtree(temp, ignore_errors=True)
+    n = len({f.path for f in files})
+    text = f"On {branch}: " + (message or time.strftime(f"GitEnough: {n} file(s) put aside %Y-%m-%d %H:%M"))
+    stash = commit(w_tree, parents, text)
+    run_git(["stash", "store", "-m", text, stash], cwd=path, timeout=30)
+
+    if not keep:
+        if tracked:
+            _run_with_paths(path, ["restore", "--source", head, "--staged", "--worktree"], tracked)
+        for batch in _chunks(untracked):
+            run_git(["--literal-pathspecs", "clean", "-f", "-q", "--", *batch], cwd=path, timeout=300)
+    return stash
 
 
 # ---------- branches ----------

@@ -12,7 +12,7 @@ from .diff_view import DiffEditor, DiffView, Line, lexer_for, parse_diff
 from .repo import BlameLine, Commit
 from .style import C
 from .tree_window import rel_time
-from .widgets import ElidedLabel, icon_button
+from .widgets import ElidedLabel, icon_button, keep_size
 
 AGE_COLORS = ["#7c8cff", "#6d7fe6", "#5f71cc", "#5263b3", "#465599", "#3b4880", "#313b66", "#282f4d"]
 
@@ -90,6 +90,7 @@ class FileHistoryWindow(QWidget):
 
         self.setWindowTitle(f"{file} · {project.name}")
         self.resize(1400, 860)
+        keep_size(self, self.main.config, "file_history")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)

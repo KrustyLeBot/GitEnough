@@ -29,6 +29,8 @@ class Config:
     list_filter: str = "all"  # main list state filter
     watch_files: bool = True  # refresh a repository as soon as its files change
     geometry: str = ""
+    # window kind ("changes", "history", ...) -> [width, height, maximized], restored when one opens
+    window_sizes: dict[str, list] = field(default_factory=dict)
 
     @classmethod
     def load(cls) -> "Config":

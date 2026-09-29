@@ -14,7 +14,7 @@ from .file_view import ExtensionBar, FileView, extension
 from .repo import Comparison, FileChange
 from .style import C
 from .tree_window import rel_time
-from .widgets import ElidedLabel, icon_button
+from .widgets import ElidedLabel, icon_button, keep_size
 
 
 def _targets(project) -> list[str]:
@@ -42,6 +42,7 @@ class CompareWindow(QWidget):
         branch = project.status.branch if project.status else "HEAD"
         self.setWindowTitle(f"Compare · {project.name}")
         self.resize(1440, 860)
+        keep_size(self, self.main.config, "compare")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)

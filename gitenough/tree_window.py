@@ -14,7 +14,7 @@ from .diff_view import DiffView, parse_diff
 from .repo import Commit, FileChange, History
 from .style import C
 from .file_view import ExtensionBar, FileView, extension
-from .widgets import icon_button
+from .widgets import icon_button, keep_size
 
 LANE_W = 14
 ROW_H = 28
@@ -290,6 +290,7 @@ class TreeWindow(QWidget):
 
         self.setWindowTitle(f"History · {project.name}")
         self.resize(1440, 900)
+        keep_size(self, self.main.config, "history")
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)

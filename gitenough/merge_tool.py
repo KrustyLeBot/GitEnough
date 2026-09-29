@@ -11,7 +11,7 @@ from . import conflicts as cf
 from .diff_view import DiffEditor, Line, lexer_for, mono_font
 from .git_ops import run_git
 from .style import C
-from .widgets import ElidedLabel
+from .widgets import ElidedLabel, keep_size
 
 LEFT_COLOR, RIGHT_COLOR = "#5aa9ff", "#b392f0"
 CHOICE_TEXT = {cf.LEFT: "{l}", cf.RIGHT: "{r}", cf.LEFT_RIGHT: "{l}, then {r}", cf.RIGHT_LEFT: "{r}, then {l}",
@@ -134,6 +134,7 @@ class MergeToolWindow(QWidget):
         self.cards: list[BlockCard] = []
         self.setWindowTitle(f"Resolve {file} · {project.title or project.name}")
         self.resize(1300, 860)
+        keep_size(self, self.main.config, "merge_tool")
 
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
