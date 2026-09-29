@@ -131,6 +131,7 @@ class ReviewWindow(QWidget):
         self.discussions: list[gitlab.Discussion] = []
         self.current = ""  # path shown, or OVERVIEW
         self.composer = None  # (path, side, line) of the comment being written
+        self._composer_widget = None
         self.editing = ""  # id of the pending comment / proposal being edited
         self.replying = ""  # discussion id with an open reply box
         self.busy = False
@@ -364,13 +365,20 @@ class ReviewWindow(QWidget):
     def populate(self):
         term = self.search.text().strip().lower()
         hide = self.hide_viewed.isChecked()
+        # Hidden when viewed, unless something there still needs attention (it stays, greyed out).
+        busy = self._commented() if hide else set()
         shown = [self._change(f) for f in self.files
                  if (not term or term in f.path.lower()) and not (hide and f.path in self.checked
-                                                                   and f.path != self.current)]
+                                                                   and f.path not in busy)]
         self.view.badges = self._badges()
         keep = (False, self.current) if self.current in self.by_path else ("", "")
         self.view.set_files(sorted(shown, key=lambda c: c.path.lower()), keep)
         self.update_counts()
+
+    def _commented(self) -> set[str]:
+        """Files with an open thread, a comment of mine not sent yet, or an AI proposal."""
+        paths = {d.path for d in self.discussions if d.path and not d.resolved}
+        return paths | {c["path"] for c in self.pending if c.get("path") not in (None, OVERVIEW)}
 
     def _badges(self) -> dict[str, tuple[str, str]]:
         counts: dict[str, list[int]] = {}
@@ -419,6 +427,8 @@ class ReviewWindow(QWidget):
         self.view.viewport().update()
         self.update_counts()
         self.save_state()
+        if self.hide_viewed.isChecked():
+            QTimer.singleShot(0, self.populate)  # after the click that ticked it, not during
 
     def _space(self, files):
         """Space / Enter / double-click: mark viewed and open the next file not viewed yet."""
@@ -569,7 +579,14 @@ class ReviewWindow(QWidget):
         self._park_focus()
         bar = self.overview.verticalScrollBar()
         scroll = bar.value()
-        QTimer.singleShot(0, lambda: bar.setValue(scroll))  # once the rebuilt page is laid out
+        composing = bool(self.composer and self.composer[0] == OVERVIEW)
+
+        def restore():
+            bar.setValue(scroll)  # once the rebuilt page is laid out
+            if composing and self._composer_widget is not None:
+                self.overview.ensureWidgetVisible(self._composer_widget, 0, 40)  # the new comment box
+
+        QTimer.singleShot(0, restore)
         lay = self.overview_lay
         while lay.count() > 1:
             w = lay.takeAt(0).widget()
@@ -647,6 +664,7 @@ class ReviewWindow(QWidget):
         path, side, line = self.composer
         card = Card("NEW COMMENT", self._where(path, side, line), C["green"], lambda: self._jump(side, line, path))
         card.lay.addWidget(Editor("", "Add to review", self._add_comment, self._cancel_comment))
+        self._composer_widget = card
         return card
 
     def start_comment(self, line):
