@@ -1,15 +1,18 @@
 """Merge tool: resolve every conflict block of a file with one side, both, none or your own text."""
 
 import os
+import subprocess
+import tempfile
+from difflib import SequenceMatcher
 
 from PySide6.QtCore import Qt, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QKeySequence, QShortcut, QTextBlockFormat, QTextCursor
 from PySide6.QtWidgets import (QCheckBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QPlainTextEdit, QPushButton,
                                QScrollArea, QTabWidget, QVBoxLayout, QWidget)
 
 from . import conflicts as cf
 from .diff_view import DiffEditor, Line, lexer_for, mono_font
-from .git_ops import run_git
+from .git_ops import GitError, run_git, run_git_bytes
 from .style import C
 from .widgets import ElidedLabel, keep_size
 
@@ -18,20 +21,71 @@ CHOICE_TEXT = {cf.LEFT: "{l}", cf.RIGHT: "{r}", cf.LEFT_RIGHT: "{l}, then {r}", 
                cf.NONE: "neither side", cf.CUSTOM: "your own text"}
 
 
-def _code_box(lines: list[str], lexer, tint: str) -> DiffEditor:
+def _code_box(lines: list[str], lexer, tint: str, first_no: int = 1, marked: set[int] | None = None,
+              mark_color: str = "", empty_text: str = "", max_lines: int = 14) -> DiffEditor:
+    """Read-only code with line numbers; `marked` lines get a tint of the side's colour."""
     ed = DiffEditor("new")
-    ed.set_lines([Line("ctx", None, i + 1, t) for i, t in enumerate(lines)]
-                 or [Line("meta", None, None, "(empty: this side removed the lines)")], lexer)
+    if lines:
+        ed.set_lines([Line("ctx", None, first_no + i, t) for i, t in enumerate(lines)], lexer)
+    else:
+        ed.set_lines([Line("meta", None, None, empty_text)], None)
     ed.setStyleSheet(f"QPlainTextEdit#diff {{ background: {tint}; }}")
-    height = ed.fontMetrics().lineSpacing() * min(max(len(lines), 2), 14) + 14
+    if marked and mark_color:
+        tint_color = QColor(mark_color)
+        tint_color.setAlpha(46)
+        block = ed.document().firstBlock()
+        n = 0
+        while block.isValid():
+            if n in marked:
+                fmt = QTextBlockFormat()
+                fmt.setBackground(tint_color)
+                QTextCursor(block).setBlockFormat(fmt)
+            block = block.next()
+            n += 1
+    height = ed.fontMetrics().lineSpacing() * min(max(len(lines), 1), max_lines) + 14
     ed.setFixedHeight(height)
     return ed
+
+
+def describe(side: list[str], base: list[str] | None) -> str:
+    """What a side did to the common ancestor's lines, in plain words."""
+    if base is None:
+        return ""
+    if side == base:
+        return "unchanged"
+    if not side:
+        return f"deleted {len(base)} line{'s' if len(base) != 1 else ''}"
+    if not base:
+        return f"added {len(side)} line{'s' if len(side) != 1 else ''}"
+    return f"changed {len(base)} → {len(side)} line{'s' if len(side) != 1 else ''}"
+
+
+def empty_text(lines: list[str]) -> str:
+    return "(nothing: this side deleted these lines)" if not lines else ""
+
+
+def blank_note(lines: list[str]) -> str:
+    """A side made only of blank lines looks empty: say it."""
+    if lines and not any(line.strip() for line in lines):
+        return f"{len(lines)} blank line{'s' if len(lines) != 1 else ''}"
+    return ""
+
+
+def differing(a: list[str], b: list[str]) -> tuple[set[int], set[int]]:
+    """Indexes of the lines of a and of b that the other side does not have."""
+    sm = SequenceMatcher(None, [x.strip() for x in a], [x.strip() for x in b], autojunk=False)
+    only_a, only_b = set(range(len(a))), set(range(len(b)))
+    for block in sm.get_matching_blocks():
+        only_a -= set(range(block.a, block.a + block.size))
+        only_b -= set(range(block.b, block.b + block.size))
+    return only_a, only_b
 
 
 class BlockCard(QFrame):
     changed = Signal()
 
-    def __init__(self, index: int, total: int, block: cf.Block, before: list[str], left: str, right: str, lexer):
+    def __init__(self, index: int, total: int, block: cf.Block, before: list[str], left: str, right: str, lexer,
+                 after: list[str] | None = None, line_no: int = 1, base: list[str] | None = None):
         super().__init__()
         self.block, self.left_label, self.right_label = block, left, right
         self._updating = False
@@ -41,35 +95,60 @@ class BlockCard(QFrame):
         lay.setSpacing(8)
 
         head = QHBoxLayout()
-        title = QLabel(f"Conflict {index} of {total}")
+        title = QLabel(f"Conflict {index} of {total}  <span style='color:{C['faint']}; font-weight:400'>"
+                       f"· line {line_no}</span>")
+        title.setTextFormat(Qt.RichText)
         title.setStyleSheet("font-weight: 700;")
         self.state = QLabel("")
         head.addWidget(title)
         head.addStretch()
         head.addWidget(self.state)
         lay.addLayout(head)
+        before = before[-3:] if before else []
         if before:
-            ctx = QLabel("\n".join(before[-3:]))
-            ctx.setFont(mono_font())
-            ctx.setStyleSheet(f"color: {C['faint']};")
-            lay.addWidget(ctx)
+            lay.addWidget(_code_box(before, lexer, "#0f1116", first_no=line_no - len(before), max_lines=3))
 
+        only_left, only_right = differing(block.left, block.right)
         sides = QHBoxLayout()
         sides.setSpacing(10)
-        for label, lines, color, choice in ((left, block.left, LEFT_COLOR, cf.LEFT),
-                                            (right, block.right, RIGHT_COLOR, cf.RIGHT)):
+        for label, lines, color, choice, marked in ((left, block.left, LEFT_COLOR, cf.LEFT, only_left),
+                                                    (right, block.right, RIGHT_COLOR, cf.RIGHT, only_right)):
             col = QVBoxLayout()
             col.setSpacing(4)
+            name_row = QHBoxLayout()
             name = ElidedLabel(f"●  {label}", Qt.ElideMiddle)
             name.setStyleSheet(f"color: {color}; font-weight: 700;")
-            col.addWidget(name)
-            col.addWidget(_code_box(lines, lexer, "#121826" if choice == cf.LEFT else "#1a1628"))
+            what = ", ".join(x for x in (describe(lines, base), blank_note(lines)) if x)
+            info = QLabel(what)
+            info.setObjectName("muted")
+            info.setToolTip("Compared with the common ancestor, the version before both branches changed it")
+            name_row.addWidget(name, 1)
+            name_row.addWidget(info)
+            col.addLayout(name_row)
+            col.addWidget(_code_box(lines, lexer, "#121826" if choice == cf.LEFT else "#1a1628", marked=marked,
+                                    mark_color=color, empty_text=empty_text(lines)))
             use = QPushButton(f"Use {label}")
             use.setObjectName("rowAction")
             use.clicked.connect(lambda _=False, c=choice: self.choose(c))
             col.addWidget(use)
             sides.addLayout(col, 1)
         lay.addLayout(sides)
+        if base is not None:
+            self.base_btn = QPushButton("Show common ancestor")
+            self.base_btn.setObjectName("rowAction")
+            self.base_btn.setCheckable(True)
+            self.base_box = _code_box(base, lexer, "#15171c", empty_text="(these lines did not exist yet)")
+            self.base_box.hide()
+            self.base_btn.toggled.connect(lambda on: (self.base_box.setVisible(on), self.base_btn.setText(
+                "Hide common ancestor" if on else "Show common ancestor")))
+            base_row = QHBoxLayout()
+            base_row.addWidget(self.base_btn)
+            hint = QLabel("the version before both branches changed it")
+            hint.setObjectName("muted")
+            base_row.addWidget(hint)
+            base_row.addStretch()
+            lay.addLayout(base_row)
+            lay.addWidget(self.base_box)
 
         more = QHBoxLayout()
         more.setSpacing(6)
@@ -82,12 +161,21 @@ class BlockCard(QFrame):
         more.addStretch()
         lay.addLayout(more)
 
-        lay.addWidget(QLabel("Result  (edit it freely)"))
+        result_row = QHBoxLayout()
+        result_row.addWidget(QLabel("Result  (edit it freely)"))
+        self.result_note = QLabel("")
+        self.result_note.setObjectName("muted")
+        result_row.addWidget(self.result_note)
+        result_row.addStretch()
+        lay.addLayout(result_row)
         self.result = QPlainTextEdit()
         self.result.setFont(mono_font())
         self.result.setPlaceholderText("Pick a side above, or type the resolved code here")
         self.result.textChanged.connect(self._edited)
         lay.addWidget(self.result)
+        if after:
+            lay.addWidget(_code_box(after[:3], lexer, "#0f1116",
+                                    first_no=line_no + max(len(block.left), len(block.right)), max_lines=3))
         self.refresh()
 
     def choose(self, choice: str):
@@ -111,11 +199,17 @@ class BlockCard(QFrame):
         self.result.setFixedHeight(self.result.fontMetrics().lineSpacing() * min(lines, 12) + 16)
         if b.choice:
             what = CHOICE_TEXT[b.choice].format(l=self.left_label, r=self.right_label)
-            self.state.setText(f"✓  {what}")
+            self.state.setText(f"✓  Resolved with {what}")
             self.state.setStyleSheet(f"color: {C['green']}; font-weight: 600;")
         else:
             self.state.setText("Unresolved")
             self.state.setStyleSheet(f"color: {C['orange']}; font-weight: 600;")
+        result = b.result()
+        self.result.setPlaceholderText("(empty result: the conflict lines are removed)" if b.choice else
+                                       "Pick a side above, or type the resolved code here")
+        self.result_note.setText("" if not b.choice else
+                                 "· the conflict lines are removed" if not result else
+                                 "· only blank lines" if not any(x.strip() for x in result) else "")
         self.changed.emit()
 
 
@@ -131,6 +225,7 @@ class MergeToolWindow(QWidget):
         self.full_path = os.path.join(project.path, file)
         with open(self.full_path, "rb") as fh:
             self.cf = cf.parse(fh.read())
+        self._fill_base()
         self.cards: list[BlockCard] = []
         self.setWindowTitle(f"Resolve {file} · {project.title or project.name}")
         self.resize(1300, 860)
@@ -181,11 +276,18 @@ class MergeToolWindow(QWidget):
         lexer = lexer_for(os.path.basename(file))
         conflicts = self.cf.conflicts
         before: list[str] = []
-        for block in self.cf.blocks:
+        line_no = 1  # where each conflict starts in the result, counting the left side
+        blocks = self.cf.blocks
+        for i, block in enumerate(blocks):
             if not block.conflict:
                 before = block.lines
+                line_no += len(block.lines)
                 continue
-            card = BlockCard(len(self.cards) + 1, len(conflicts), block, before, left, right, lexer)
+            after = blocks[i + 1].lines if i + 1 < len(blocks) and not blocks[i + 1].conflict else []
+            base = block.base if block.base or self.has_base else None
+            card = BlockCard(len(self.cards) + 1, len(conflicts), block, before, left, right, lexer, after, line_no,
+                             base)
+            line_no += len(block.left)
             card.changed.connect(self.update_state)
             self.cards.append(card)
             cards.addWidget(card)
@@ -224,6 +326,47 @@ class MergeToolWindow(QWidget):
         root.addWidget(foot)
         QShortcut(QKeySequence("Ctrl+S"), self, self.save)
         self.update_state()
+
+    def _fill_base(self):
+        """The common ancestor of each conflict, from git's index (stages 1-3), when the markers lack it.
+
+        Rebuilt in memory with git merge-file --diff3; used only when it yields the same conflicts.
+        """
+        self.has_base = any(b.base for b in self.cf.conflicts)
+        if self.has_base:
+            return
+        try:
+            stages = [run_git_bytes(["show", f":{n}:{self.file}"], cwd=self.p.path, timeout=30) for n in (1, 2, 3)]
+        except GitError:
+            return  # no ancestor (both added the file) or not an index conflict
+        folder = tempfile.mkdtemp(prefix="gitenough-merge-")
+        try:
+            paths = []
+            for name, data in zip(("base", "ours", "theirs"), stages):
+                path = os.path.join(folder, name)
+                with open(path, "wb") as fh:
+                    fh.write(data)
+                paths.append(path)
+            out = subprocess.run(["git", "merge-file", "-p", "--diff3", paths[1], paths[0], paths[2]],
+                                 capture_output=True, timeout=30,
+                                 creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+        except (OSError, subprocess.SubprocessError):
+            return
+        finally:
+            for name in os.listdir(folder):
+                os.remove(os.path.join(folder, name))
+            os.rmdir(folder)
+        rebuilt = cf.parse(out)
+
+        def version(parsed: cf.ConflictFile, side: str) -> list[str]:
+            return [x for b in parsed.blocks for x in (getattr(b, side) if b.conflict else b.lines)]
+
+        # git merge joins nearby conflicts into one; merge-file --diff3 keeps them apart, each with its
+        # ancestor. When both describe exactly the same two versions, the finer split is shown.
+        if version(rebuilt, "left") == version(self.cf, "left") and \
+                version(rebuilt, "right") == version(self.cf, "right"):
+            self.cf.blocks = rebuilt.blocks
+            self.has_base = True
 
     def choose_all(self, choice: str):
         for card in self.cards:
