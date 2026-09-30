@@ -5,12 +5,13 @@ import time
 from PySide6.QtCore import QEvent, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
-                               QPlainTextEdit, QPushButton, QSplitter, QVBoxLayout, QWidget)
+                               QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
 
 from . import ai, rebase, repo
 from .config import Config
 from .diff_view import DiffView, parse_diff
 from .errors import explain
+from .file_editor import FileEditor
 from .file_view import ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
 from .repo import FileChange
@@ -175,12 +176,24 @@ class ChangesWindow(QWidget):
         self.diff = DiffView()
         self.diff.options_changed.connect(lambda: self.current and self.show_diff(self.current))
         self.diff.patch_requested.connect(self.apply_patch)
-        split.addWidget(self.diff)
+        self.edit_btn = QPushButton("✎ Edit")
+        self.edit_btn.setObjectName("rowAction")
+        self.edit_btn.setToolTip("Edit this file here (Ctrl+E); saving evaluates the changes again")
+        self.edit_btn.clicked.connect(self.edit_current)
+        self.diff.add_title_widget(self.edit_btn)
+        self.editor = FileEditor()
+        self.editor.saved.connect(self._on_saved)
+        self.editor.closed.connect(self._close_editor)
+        self.center = QStackedWidget()
+        self.center.addWidget(self.diff)
+        self.center.addWidget(self.editor)
+        split.addWidget(self.center)
         split.setStretchFactor(1, 1)
         split.setSizes([420, 1020])
         root.addWidget(split, 1)
 
         QShortcut(QKeySequence("F5"), self, self.refresh)
+        QShortcut(QKeySequence("Ctrl+E"), self, self.edit_current)
         QShortcut(QKeySequence("Ctrl+F"), self, lambda: self.search.setFocus())
         QShortcut(QKeySequence("Ctrl+Return"), self, lambda: self.do_commit(False))
         self.search_timer = QTimer(self, singleShot=True, interval=300)
@@ -425,6 +438,11 @@ class ChangesWindow(QWidget):
     def on_selection(self, view: FileView):
         if not view.selectedItems():
             return
+        if self.editing:
+            if not self.editor.confirm_leave():
+                self._select(self.current)  # stay on the file with unsaved edits
+                return
+            self.center.setCurrentIndex(0)
         other = self.unstaged_view if view is self.staged_view else self.staged_view
         other.blockSignals(True)
         other.clearSelection()
@@ -433,6 +451,50 @@ class ChangesWindow(QWidget):
         if fc and (self.current is None or fc.key != self.current.key):
             self.current = fc
             self.show_diff(fc)
+
+    # ---------- edit a file in place ----------
+    @property
+    def editing(self) -> bool:
+        return self.center.currentIndex() == 1
+
+    def _editable(self, fc: FileChange | None) -> bool:
+        return fc is not None and fc.code != "U" and os.path.isfile(os.path.join(self.path, fc.path))
+
+    def edit_current(self):
+        fc = self.current
+        if self.editing or fc is None:
+            return
+        if fc.code == "U":
+            self.main.open_merge_tool(self.p, fc.path)  # conflicts have their own editor
+            return
+        error = self.editor.open_file(self.path, fc.path)
+        if error:
+            QMessageBox.information(self, "Edit", f"{fc.path}\n\n{error}")
+            return
+        self.center.setCurrentIndex(1)
+
+    def _on_saved(self, rel: str):
+        # Diffs are cached per file: the saved one must be computed again, even if the list looks the same.
+        self.diff_cache.clear()
+        self.status.setText(f"Saved {rel}")
+        self.refresh()
+        if self.current is not None:
+            self.show_diff(self.current)
+
+    def _close_editor(self):
+        self.center.setCurrentIndex(0)
+        if self.current is not None:
+            self.show_diff(self.current)
+
+    def _select(self, fc: FileChange | None):
+        view = self.staged_view if fc is not None and fc.staged else self.unstaged_view
+        for v in (self.staged_view, self.unstaged_view):
+            v.blockSignals(True)
+            v.clearSelection()
+        if fc is not None:
+            view.select_path(fc.path)
+        for v in (self.staged_view, self.unstaged_view):
+            v.blockSignals(False)
 
     def show_diff(self, fc: FileChange):
         ws, full = self.diff.ignore_ws, self.diff.full_file
@@ -455,6 +517,7 @@ class ChangesWindow(QWidget):
             self._display(fc, data)
 
     def _display(self, fc: FileChange, data):
+        self.edit_btn.setEnabled(self._editable(fc))
         shown = self.diff.data
         same = (shown is not None and self.diff.filename == fc.path and self._shown_key == fc.key
                 and getattr(shown, "signature", None) == getattr(data, "signature", object()))
@@ -661,6 +724,8 @@ class ChangesWindow(QWidget):
         self.update_buttons()
 
     def update_buttons(self):
+        if not hasattr(self, "commit_btn"):
+            return  # the restored draft fires textChanged while the panel is still being built
         ok = bool(self.staged) and bool(self.message.toPlainText().strip()) and not self.busy
         self.commit_btn.setEnabled(ok)
         if hasattr(self, "suggest_btn"):
@@ -694,6 +759,7 @@ class ChangesWindow(QWidget):
         entries += [
             (None, None, True),
             ("File history && blame", lambda: self.main.open_file_history(self.p, fc.path), single and tracked),
+            ("Edit here", lambda: self.edit_current(), single and self._editable(fc)),
             ("Open file", lambda: os.path.exists(full) and os.startfile(full), single),
             ("Show in Explorer", lambda: subprocess.Popen(["explorer", "/select,", os.path.normpath(full)]), single),
             ("Copy path", lambda: QGuiApplication.clipboard().setText("\n".join(f.path for f in files)), True),
@@ -709,6 +775,9 @@ class ChangesWindow(QWidget):
         menu.exec(view.viewport().mapToGlobal(pos))
 
     def closeEvent(self, event):
+        if self.editing and not self.editor.confirm_leave():
+            event.ignore()
+            return
         if self.draft_timer.isActive():
             self.draft_timer.stop()
             Config.save_draft(self.path, self.message.toPlainText())
@@ -719,4 +788,6 @@ class ChangesWindow(QWidget):
         if (event.type() == QEvent.ActivationChange and self.isActiveWindow() and not self.busy
                 and time.monotonic() - self.last_refresh > 2):
             self.refresh()
+            if self.editing:
+                self.editor.reload_if_clean()
         super().changeEvent(event)

@@ -711,6 +711,7 @@ class DiffView(QWidget):
         self.stats.setTextFormat(Qt.RichText)
         top.addWidget(self.title, 1)
         top.addWidget(self.stats)
+        self._title_row = top
         rows.addLayout(top)
         hl = QHBoxLayout()
         hl.setSpacing(8)
@@ -804,6 +805,10 @@ class DiffView(QWidget):
         self.stack.addWidget(self.unified)
         self.stack.addWidget(split)
         lay.addWidget(self.stack, 1)
+
+    def add_title_widget(self, widget: QWidget):
+        """A tool shown next to the file name (e.g. Edit in the Changes window)."""
+        self._title_row.addWidget(widget)
 
     @property
     def ignore_ws(self) -> bool:

@@ -43,6 +43,9 @@ state at a glance, so you pull, switch and commit without opening each one.
 - Clean diff viewer: split or unified, syntax highlighting, word-level changes, find in diff. Stays fast on
   generated files with very long lines.
 - Stage, unstage or discard whole files, **single hunks or selected lines**.
+- **Edit a file in place** (✎ Edit or Ctrl+E): the whole file opens in the diff area, with line numbers and
+  syntax colours; Save writes it with its encoding, BOM and line endings unchanged, and the changes are
+  evaluated again at once.
 - **Stash exactly the files you tick**, from the staged and unstaged lists alike (new files included), then
   choose: revert them, or keep your changes and only save a copy. Nothing else is touched, and applying the
   stash brings staged parts back staged.
