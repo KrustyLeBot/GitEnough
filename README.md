@@ -74,6 +74,10 @@ state at a glance, so you pull, switch and commit without opening each one.
   remote.
 - **Built-in merge tool**: for every conflict, keep one side, both (in either order), neither, or write your own
   text. Sides are named after their branch (`origin/develop`, `feature/x`, `stash`), never "ours / theirs".
+- **Cherry-pick onto a branch**: select one or more commits in the history (Ctrl / Shift click), right-click,
+  pick the destination branch. GitEnough puts your local changes aside, switches, applies the commits oldest
+  first, stops on conflicts for you to resolve in the merge tool (sides named after the branches), then brings
+  you back with your changes. A remote branch without a local one gets a local branch tracking it.
 - **Reset to a remote branch**: after someone force-pushed, recreate your local branch from `origin/…` in one
   click, with your changes stashed and your old commits kept in a backup branch.
 - Conflicts explained in plain words, with **Stash & retry** when local changes block a pull or a switch.

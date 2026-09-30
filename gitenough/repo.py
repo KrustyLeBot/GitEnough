@@ -552,7 +552,13 @@ def history(path: str, scope: str, limit: int, base: str = "") -> History:
     with ThreadPoolExecutor(max_workers=1) as pool:
         remotes_job = pool.submit(run_git, ["remote"], path, None, 15)
         try:
-            out = run_git(args, cwd=path, timeout=120)
+            try:
+                out = run_git(args, cwd=path, timeout=120)
+            except GitError as exc:
+                # --ignore-missing does not cover @{upstream} on a branch without one (never pushed).
+                if "@{upstream}" not in args or "upstream" not in str(exc).lower():
+                    raise
+                out = run_git([a for a in args if a != "@{upstream}"], cwd=path, timeout=120)
         except GitError as exc:
             if "does not have any commits" in str(exc) or "bad default revision" in str(exc):
                 return History()

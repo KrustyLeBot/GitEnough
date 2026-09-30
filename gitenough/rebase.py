@@ -182,6 +182,15 @@ def conflict_sides(path: str) -> tuple[str, str]:
             subject = run_git(["log", "-1", "--format=%h %s", head], cwd=path, timeout=15).strip()
         except GitError:
             subject = op
+        # The branch the picked commit comes from, when it is on one: a name people recognise.
+        try:
+            source = run_git(["name-rev", "--name-only", "--no-undefined", "--refs=refs/heads/*",
+                              "--refs=refs/remotes/*", head], cwd=path, timeout=15).strip()
+        except GitError:
+            source = ""
+        source = _short_ref(re.split(r"[~^]", source)[0]) if source else ""
+        if source and source != current:
+            return current, f"{source} · {subject.split(' ', 1)[0]}"
         return current, subject[:50]
     # No operation in progress but conflicts left: a stash that did not apply cleanly.
     return current, "stash"

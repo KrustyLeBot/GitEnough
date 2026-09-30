@@ -348,7 +348,10 @@ class TreeWindow(QWidget):
         self.table.verticalHeader().setMinimumSectionSize(ROW_H)
         self.table.setShowGrid(False)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
-        self.table.setSelectionMode(QAbstractItemView.SingleSelection)
+        # Several commits can be selected (Ctrl / Shift click) to cherry-pick them together.
+        self.table.setSelectionMode(QAbstractItemView.ExtendedSelection)
+        self.table.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.table.customContextMenuRequested.connect(self.commit_menu)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
         self.table.setMouseTracking(True)
@@ -519,6 +522,29 @@ class TreeWindow(QWidget):
         if fc and fc is not self.file:
             self.file = fc
             self.show_diff(fc)
+
+    def selected_commits(self) -> list[Commit]:
+        rows = sorted({i.row() for i in self.table.selectionModel().selectedRows(0)})
+        return [self.model.index(r, 0).data(Qt.UserRole)[0] for r in rows]
+
+    def commit_menu(self, pos):
+        index = self.table.indexAt(pos)
+        if not index.isValid():
+            return
+        if not self.table.selectionModel().isRowSelected(index.row(), QModelIndex()):
+            self.table.selectRow(index.row())
+        commits = self.selected_commits()
+        if not commits:
+            return
+        n = len(commits)
+        menu = QMenu(self)
+        pick = QAction(f"Cherry-pick {'this commit' if n == 1 else f'{n} commits'} onto a branch…", menu)
+        pick.triggered.connect(lambda: self.main.open_cherry_pick(self.p, [c.sha for c in commits]))
+        copy = QAction("Copy commit id" if n == 1 else "Copy commit ids", menu)
+        copy.triggered.connect(lambda: QGuiApplication.clipboard().setText("\n".join(c.sha for c in commits)))
+        menu.addAction(pick)
+        menu.addAction(copy)
+        menu.exec(self.table.viewport().mapToGlobal(pos))
 
     def file_menu(self, pos):
         files = self.files.item_files_at(pos)

@@ -299,6 +299,8 @@ class Row:
         elif kind == "bash":
             if self.p.snap and self.p.snap.op == "rebase":
                 self.win.open_rebase(self.p)
+            elif self.p.snap and self.p.snap.op == "cherry-pick":
+                self.win.open_cherry_pick(self.p, [])
             else:
                 self.win.open_bash(self.p.path)
         else:
@@ -399,8 +401,9 @@ class Row:
             "publish": ("Publish", "Push this branch to origin and track it"),
             "push": ("Push", "Push local commits"),
             "pull": ("Pull", "Fetch, then fast-forward if behind"),
-            "bash": ("Resolve…", "Resolve the conflicts and continue the rebase")
-            if p.snap and p.snap.op == "rebase" else ("Git Bash", "Open Git Bash to finish the operation in progress"),
+            "bash": ("Resolve…", f"Resolve the conflicts and continue the {p.snap.op}")
+            if p.snap and p.snap.op in ("rebase", "cherry-pick")
+            else ("Git Bash", "Open Git Bash to finish the operation in progress"),
             "none": ("No remote", "This repository has no origin remote"),
         }[self.action_kind()]
         self.action.setText(text)
@@ -1128,6 +1131,18 @@ class MainWindow(QMainWindow):
         if p.snap and p.snap.kind == "repo":
             win = self._open_window("rebase", p, lambda: RebaseWindow(self, p, branch, onto))
             win.destroyed.connect(lambda *_: self.refresh_windows(p))
+
+    def open_cherry_pick(self, p: Project, shas: list[str]):
+        from .cherry_pick_window import CherryPickWindow
+
+        if not (p.snap and p.snap.kind == "repo"):
+            return
+        win = self.windows.get(("cherry_pick", p.path))
+        if win is not None and shas and win.pages.currentIndex() == 0:
+            win.shas = shas  # new selection from the history: set it up again
+            win.reload_setup()
+        win = self._open_window("cherry_pick", p, lambda: CherryPickWindow(self, p, shas))
+        win.destroyed.connect(lambda *_: self.refresh_windows(p))
 
     def open_merge_tool(self, p: Project, file: str):
         from .merge_tool import MergeToolWindow
