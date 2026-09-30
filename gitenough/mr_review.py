@@ -10,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 
 from . import ai, ai_review, gitlab, review_skill, vault
 from .diff_view import DiffView, parse_diff
-from .file_view import FileView
+from .file_view import ExtensionBar, FileView, extension
 from .git_ops import Credential, GitError, run_git
 from .repo import FileChange
 from .style import C
@@ -250,6 +250,11 @@ class ReviewWindow(QWidget):
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self.populate)
         lay.addWidget(self.search)
+        # Show only one extension (display only: nothing is marked viewed).
+        self.ext = ""
+        self.ext_bar = ExtensionBar()
+        self.ext_bar.toggled.connect(self.set_ext)
+        lay.addWidget(self.ext_bar)
         row = QHBoxLayout()
         self.viewed_label = QLabel("")
         self.viewed_label.setObjectName("muted")
@@ -369,11 +374,17 @@ class ReviewWindow(QWidget):
         busy = self._commented() if hide else set()
         shown = [self._change(f) for f in self.files
                  if (not term or term in f.path.lower()) and not (hide and f.path in self.checked
-                                                                   and f.path not in busy)]
+                                                                   and f.path not in busy)
+                 and (not self.ext or extension(f.path) == self.ext)]
+        self.ext_bar.set_files([self._change(f) for f in self.files], self.ext)
         self.view.badges = self._badges()
         keep = (False, self.current) if self.current in self.by_path else ("", "")
         self.view.set_files(sorted(shown, key=lambda c: c.path.lower()), keep)
         self.update_counts()
+
+    def set_ext(self, ext: str):
+        self.ext = ext
+        self.populate()
 
     def _commented(self) -> set[str]:
         """Files with an open thread, a comment of mine not sent yet, or an AI proposal."""
