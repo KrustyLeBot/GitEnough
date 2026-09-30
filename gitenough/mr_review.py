@@ -972,10 +972,12 @@ class ReviewWindow(QWidget):
         for fnd in findings:
             f = self.by_path.get(fnd.file)
             attachable = ai_review.is_attachable(f, fnd.side, fnd.line)
-            body = fnd.body if attachable or f is None else f"(line {fnd.line}) {fnd.body}"
+            # The severity is part of the text: it reaches GitLab with the comment and can be edited.
+            text = f"**{fnd.severity.capitalize()}** · {fnd.body.strip()}"
+            body = text if attachable or f is None else f"(line {fnd.line}) {text}"
             self.pending.append({"id": uuid.uuid4().hex, "path": fnd.file if f else OVERVIEW,
                                  "side": fnd.side if attachable else None, "line": fnd.line if attachable else None,
-                                 "body": body if f else f"**`{fnd.file}`**\n\n{fnd.body}",
+                                 "body": body if f else f"**`{fnd.file}`**\n\n{text}",
                                  "status": "proposed", "source": "ai", "severity": fnd.severity})
         self.save_state()
         self.populate()
