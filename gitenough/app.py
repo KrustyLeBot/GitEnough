@@ -1399,6 +1399,22 @@ class MainWindow(QMainWindow):
                 self.toast = UpdateToast(self, release)
             self.toast.place()
             self.toast.show()
+            if manual:
+                # Asked from Settings > About: that dialog is modal and blocks the toast's buttons, so the
+                # choice is offered on top of it.
+                box = QMessageBox(QMessageBox.Question, "Update available",
+                                  f"GitEnough {release.version} is available (you have {__version__})."
+                                  + (f"\n\n{release.notes}" if release.notes else "")
+                                  + ("\n\nIt downloads, replaces this version and restarts GitEnough."
+                                     if updater.running_exe() else ""),
+                                  QMessageBox.NoButton, QApplication.activeModalWidget() or self)
+                now = box.addButton("Update now" if updater.running_exe() else "Open download page",
+                                    QMessageBox.AcceptRole)
+                box.addButton("Later", QMessageBox.RejectRole)
+                box.setDefaultButton(now)
+                box.exec()
+                if box.clickedButton() is now:
+                    self.toast.start()  # progress shows in the toast; the restart closes every window
 
         self.tasks.submit_network(updater.check, done)
 

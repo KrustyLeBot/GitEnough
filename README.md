@@ -87,6 +87,9 @@ state at a glance, so you pull, switch and commit without opening each one.
 - Discussions **inline under their line**: reply and resolve right away. Click a line number to write a
   comment; your comments wait as drafts and **Send comments** publishes them as one GitLab review.
 - The overview gathers the description, the general discussion and every comment by file, with *Go to file*.
+- **Pipeline, approvals and merge state** at a glance under the title. **Approve** (or revoke) in one click.
+  Click the pipeline to see it in the app: stages, jobs, and the log of the job you pick, the failed one first;
+  it refreshes while it runs, with *Open in GitLab* one click away.
 
 **AI code review (Claude)**
 - **AI review** runs Claude (Sonnet by default) on the merge request and turns its findings into proposals

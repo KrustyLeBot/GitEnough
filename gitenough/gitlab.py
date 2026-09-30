@@ -96,6 +96,14 @@ class MergeRequest:
     base_sha: str = ""
     start_sha: str = ""
     head_sha: str = ""
+    pipeline_status: str = ""  # success, failed, running, pending, canceled, manual, skipped, ... ("" = none)
+    pipeline_url: str = ""
+    pipeline_id: int = 0
+    merge_status: str = ""  # detailed_merge_status: mergeable, not_approved, ci_must_pass, conflict, ...
+    approvals_required: int = 0
+    approved_by: list = field(default_factory=list)  # names
+    user_approved: bool = False
+    can_approve: bool = False
 
     @property
     def key(self) -> str:
@@ -273,10 +281,60 @@ class Client:
             draft=bool(item.get("draft") or item.get("work_in_progress")), state=item.get("state", ""),
             notes=int(item.get("user_notes_count") or 0), conflicts=bool(item.get("has_conflicts")),
             description=item.get("description") or "", base_sha=refs.get("base_sha", ""),
-            start_sha=refs.get("start_sha", ""), head_sha=refs.get("head_sha", ""))
+            start_sha=refs.get("start_sha", ""), head_sha=refs.get("head_sha", ""),
+            pipeline_status=(item.get("head_pipeline") or {}).get("status", ""),
+            pipeline_url=(item.get("head_pipeline") or {}).get("web_url", ""),
+            pipeline_id=int((item.get("head_pipeline") or {}).get("id") or 0),
+            merge_status=item.get("detailed_merge_status") or item.get("merge_status") or "")
 
     def merge_request(self, project: str, iid: int) -> MergeRequest:
-        return self._mr(self.get(f"/projects/{self.pid(project)}/merge_requests/{iid}"))
+        mr = self._mr(self.get(f"/projects/{self.pid(project)}/merge_requests/{iid}"))
+        try:
+            self.fill_approvals(mr)
+        except GitLabError:
+            pass  # approvals unavailable (rights, GitLab edition): the rest of the review works
+        return mr
+
+    # ---------- pipeline ----------
+    def pipeline(self, project: str, pipeline_id: int) -> dict:
+        return self.get(f"/projects/{self.pid(project)}/pipelines/{pipeline_id}") or {}
+
+    def pipeline_jobs(self, project: str, pipeline_id: int) -> list[dict]:
+        """Jobs and bridges (child / downstream pipelines) of a pipeline, latest attempt of each."""
+        base = f"/projects/{self.pid(project)}/pipelines/{pipeline_id}"
+        jobs = self.get_all(f"{base}/jobs", 500)
+        try:
+            for b in self.get_all(f"{base}/bridges", 200):
+                b["bridge"] = True
+                jobs.append(b)
+        except GitLabError:
+            pass
+        return jobs
+
+    def job_log(self, project: str, job_id: int, limit: int = 400_000) -> str:
+        """The end of a job's log (the useful part when it failed)."""
+        url = f"{self.base}/projects/{self.pid(project)}/jobs/{job_id}/trace"
+        req = urllib.request.Request(url, headers={"PRIVATE-TOKEN": self.token, "User-Agent": USER_AGENT})
+        try:
+            with urllib.request.urlopen(req, timeout=60) as resp:
+                raw = resp.read()
+        except urllib.error.HTTPError as exc:
+            raise GitLabError(f"{self.host} answered {exc.code} for the job log") from exc
+        except (urllib.error.URLError, OSError) as exc:
+            raise GitLabError(f"Could not reach {self.host}: {getattr(exc, 'reason', exc)}") from exc
+        return raw[-limit:].decode("utf-8", "replace")
+
+    def fill_approvals(self, mr: MergeRequest) -> None:
+        data = self.get(f"/projects/{self.pid(mr.project)}/merge_requests/{mr.iid}/approvals") or {}
+        mr.approved_by = [(a.get("user") or {}).get("name", "") for a in data.get("approved_by") or []]
+        mr.approvals_required = int(data.get("approvals_required") or 0)
+        mr.user_approved = bool(data.get("user_has_approved"))
+        mr.can_approve = bool(data.get("user_can_approve"))
+
+    def approve(self, mr: MergeRequest, approve: bool) -> None:
+        path = f"/projects/{self.pid(mr.project)}/merge_requests/{mr.iid}/{'approve' if approve else 'unapprove'}"
+        # sha: GitLab refuses the approval if new commits arrived since the diff was read.
+        self._request("POST", path, body={"sha": mr.head_sha} if approve and mr.head_sha else {})
 
     # ---------- content ----------
     def diffs(self, project: str, iid: int, progress=None) -> list[FileDiff]:

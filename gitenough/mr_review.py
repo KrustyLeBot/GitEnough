@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 from . import ai, ai_review, gitlab, review_skill, vault
 from .diff_view import DiffView, parse_diff
 from .file_view import ExtensionBar, FileView, extension
+from .pipeline_view import PipelinePage, chip_style
 from .git_ops import Credential, GitError, run_git
 from .repo import FileChange
 from .style import C
@@ -18,7 +19,28 @@ from .widgets import ElidedLabel, Spinner, ai_error_dialog, icon_button, keep_si
 
 SEVERITY_COLORS = {"critical": C["red"], "major": C["orange"], "minor": C["yellow"], "suggestion": C["blue"],
                    "summary": C["violet"]}
-OVERVIEW = "\0overview"  # pseudo path of the merge request's general discussion
+OVERVIEW = "\0overview"
+PIPELINE = {  # status -> (label, colour key)
+    "success": ("✓  Pipeline passed", "green"), "failed": ("✕  Pipeline failed", "red"),
+    "running": ("●  Pipeline running", "blue"), "pending": ("●  Pipeline pending", "orange"),
+    "created": ("●  Pipeline created", "orange"), "waiting_for_resource": ("●  Pipeline waiting", "orange"),
+    "preparing": ("●  Pipeline preparing", "orange"), "scheduled": ("●  Pipeline scheduled", "orange"),
+    "manual": ("▶  Pipeline waiting for a manual job", "orange"), "canceled": ("–  Pipeline canceled", "faint"),
+    "skipped": ("–  Pipeline skipped", "faint"),
+}
+PIPELINE_VIEW = "\0pipeline"  # pseudo path shown in the centre area
+PIPELINE_ACTIVE = {"running", "pending", "created", "waiting_for_resource", "preparing", "scheduled"}
+MERGE = {  # detailed_merge_status -> (label, colour key)
+    "mergeable": ("Ready to merge", "green"), "not_approved": ("Needs approval", "orange"),
+    "ci_must_pass": ("Pipeline must pass", "orange"), "ci_still_running": ("Waiting for the pipeline", "blue"),
+    "discussions_not_resolved": ("Unresolved threads", "orange"), "draft_status": ("Draft", "faint"),
+    "conflict": ("Conflicts", "red"), "need_rebase": ("Needs rebase", "orange"),
+    "requested_changes": ("Changes requested", "red"), "blocked_status": ("Blocked by another merge request", "red"),
+    "checking": ("Checking mergeability…", "faint"), "unchecked": ("Checking mergeability…", "faint"),
+    "preparing": ("Checking mergeability…", "faint"), "not_open": ("Not open", "faint"),
+    "can_be_merged": ("Ready to merge", "green"), "cannot_be_merged": ("Cannot be merged", "red"),
+}
+  # pseudo path of the merge request's general discussion
 
 
 def when(stamp: str) -> str:
@@ -143,6 +165,8 @@ class ReviewWindow(QWidget):
         self.viewed: dict[str, str] = dict(store.get("viewed", {}))  # path -> diff signature when viewed
         self.pending: list[dict] = list(store.get("pending", []))  # comments written here, not sent yet
         self.summary = store.get("summary", "")
+        self.status_timer = QTimer(self, interval=20_000)  # while the pipeline runs
+        self.status_timer.timeout.connect(self.refresh_status)
         self.bridge = _Bridge()
         self.bridge.progress.connect(self._on_ai_progress)
         self.bridge.found.connect(self._on_ai_found)
@@ -166,6 +190,8 @@ class ReviewWindow(QWidget):
         self.center = QStackedWidget()
         self.center.addWidget(self.diff)
         self.center.addWidget(self._overview_page())
+        self.pipeline_page = PipelinePage(self.tasks)
+        self.center.addWidget(self.pipeline_page)
         split.addWidget(self.center)
         split.setStretchFactor(1, 1)
         split.setSizes([360, 1240])
@@ -195,6 +221,21 @@ class ReviewWindow(QWidget):
         sub_row.addWidget(self.sub, 1)
         titles.addWidget(self.title)
         titles.addLayout(sub_row)
+        # Pipeline, approvals and merge state, as small chips under the title.
+        chips = QHBoxLayout()
+        chips.setContentsMargins(0, 4, 0, 0)
+        chips.setSpacing(6)
+        self.pipeline_chip = QPushButton("")
+        self.pipeline_chip.setCursor(Qt.PointingHandCursor)
+        self.pipeline_chip.setToolTip("Show the pipeline: stages, jobs and their logs")
+        self.pipeline_chip.clicked.connect(self.show_pipeline)
+        self.approvals_chip = QLabel("")
+        self.merge_chip = QLabel("")
+        for w in (self.pipeline_chip, self.approvals_chip, self.merge_chip):
+            w.hide()
+            chips.addWidget(w)
+        chips.addStretch()
+        titles.addLayout(chips)
         hl.addLayout(titles, 1)
         web = icon_button("globe", "Open in GitLab")
         web.clicked.connect(lambda: self.mr.web_url and QDesktopServices.openUrl(QUrl(self.mr.web_url)))
@@ -207,6 +248,9 @@ class ReviewWindow(QWidget):
         self.send_btn = QPushButton("Send comments")
         self.send_btn.setObjectName("primary")
         self.send_btn.clicked.connect(self.send)
+        self.approve_btn = QPushButton("✓ Approve")
+        self.approve_btn.clicked.connect(self.toggle_approve)
+        self.approve_btn.hide()
         self.ai_left = QLabel("")
         self.ai_left.setObjectName("muted")
         self.ai_next = QPushButton("Next proposal ▸")
@@ -215,7 +259,8 @@ class ReviewWindow(QWidget):
         self.file_comment = QPushButton("Comment on file")
         self.file_comment.setToolTip("A comment on the whole file shown (click a line number for a line)")
         self.file_comment.clicked.connect(lambda: self.start_comment(None))
-        for w in (self.ai_left, self.ai_next, self.file_comment, web, refresh, self.ai_btn, self.send_btn):
+        for w in (self.ai_left, self.ai_next, self.file_comment, web, refresh, self.ai_btn, self.approve_btn,
+                  self.send_btn):
             hl.addWidget(w)
         return header
 
@@ -347,6 +392,7 @@ class ReviewWindow(QWidget):
         if mr.conflicts:
             bits.append("Has conflicts")
         self.sub.setText("  ·  ".join(bits))
+        self.render_status()
         self.populate()
         if not self.current:
             first = next((f.path for f in sorted(self.files, key=lambda f: f.path.lower())
@@ -1013,6 +1059,103 @@ class ReviewWindow(QWidget):
         self.render_cards()
         if n:
             self.next_proposal()
+
+    # ---------- pipeline, approvals, merge state ----------
+    def render_status(self):
+        mr = self.mr
+        pipe = PIPELINE.get(mr.pipeline_status)
+        self.pipeline_chip.setVisible(bool(mr.pipeline_status))
+        if mr.pipeline_status:
+            label, color = pipe or (f"Pipeline {mr.pipeline_status.replace('_', ' ')}", "faint")
+            self.pipeline_chip.setText(label)
+            self.pipeline_chip.setStyleSheet(chip_style(color))
+        names = [n for n in mr.approved_by if n]
+        if mr.approvals_required or names:
+            done = len(names)
+            text = f"✓  {done} / {mr.approvals_required} approvals" if mr.approvals_required else \
+                f"✓  Approved by {', '.join(names)}" if len(names) <= 2 else f"✓  {done} approvals"
+            ok = done >= mr.approvals_required and done > 0
+            self.approvals_chip.setText(text)
+            self.approvals_chip.setStyleSheet(chip_style("green" if ok else "orange" if mr.approvals_required else
+                                                         "faint"))
+            self.approvals_chip.setToolTip("Approved by " + ", ".join(names) if names else "No approval yet")
+            self.approvals_chip.show()
+        else:
+            self.approvals_chip.hide()
+        merge = MERGE.get(mr.merge_status)
+        self.merge_chip.setVisible(bool(mr.merge_status))
+        if mr.merge_status:
+            label, color = merge or (mr.merge_status.replace("_", " ").capitalize(), "faint")
+            self.merge_chip.setText(label)
+            self.merge_chip.setStyleSheet(chip_style(color))
+        # Approve is offered only when GitLab says so (not on your own merge request, rights, ...).
+        self.approve_btn.setVisible(mr.can_approve or mr.user_approved)
+        self.approve_btn.setText("Revoke approval" if mr.user_approved else "✓ Approve")
+        self.approve_btn.setToolTip("Withdraw your approval" if mr.user_approved else
+                                    "Approve the merge request in GitLab")
+        self.approve_btn.setStyleSheet("" if mr.user_approved else
+                                       f"QPushButton {{ color: {C['green']}; border-color: rgba(62,207,142,0.45); }}"
+                                       "QPushButton:hover { background: rgba(62,207,142,0.12); }")
+        if mr.pipeline_status in PIPELINE_ACTIVE:
+            if not self.status_timer.isActive():
+                self.status_timer.start()
+        else:
+            self.status_timer.stop()
+
+    def toggle_approve(self):
+        if self.client is None or self.busy:
+            return
+        approve = not self.mr.user_approved
+        self.approve_btn.setEnabled(False)
+        self.sub.setText("Approving…" if approve else "Revoking the approval…")
+        mr, client = self.mr, self.client
+
+        def work():
+            client.approve(mr, approve)
+            return client.merge_request(mr.project, mr.iid)
+
+        def done(fresh, error):
+            self.approve_btn.setEnabled(True)
+            if error:
+                QMessageBox.warning(self, "Approve", str(error))
+                self.sub.setText("")
+                return
+            self._take_status(fresh)
+            self.sub.setText("Approved" if approve else "Approval revoked")
+
+        self.tasks.submit_api(work, done)
+
+    def show_pipeline(self):
+        if self.client is None or not self.mr.pipeline_id:
+            return
+        self.current = PIPELINE_VIEW
+        self.overview_btn.setChecked(False)
+        self.file_comment.hide()
+        self.view.blockSignals(True)
+        self.view.clearSelection()
+        self.view.blockSignals(False)
+        self.center.setCurrentIndex(2)
+        self.pipeline_page.show_pipeline(self.client, self.mr.project, self.mr.pipeline_id, self.mr.pipeline_url)
+
+    def refresh_status(self):
+        """Pipeline and approvals only (while the pipeline runs): the diffs are not reloaded."""
+        if self.client is None or self.busy or not self.isVisible():
+            return
+        if self.current == PIPELINE_VIEW:
+            self.pipeline_page.reload()
+        mr, client = self.mr, self.client
+        self.tasks.submit_api(lambda: client.merge_request(mr.project, mr.iid),
+                              lambda fresh, error: fresh is not None and not error and self._take_status(fresh))
+
+    def _take_status(self, fresh: gitlab.MergeRequest):
+        mr = self.mr
+        for name in ("pipeline_status", "pipeline_url", "pipeline_id", "merge_status", "approvals_required",
+                     "approved_by",
+                     "user_approved", "can_approve", "draft", "conflicts"):
+            setattr(mr, name, getattr(fresh, name))
+        if fresh.head_sha and fresh.head_sha != mr.head_sha:
+            self.sub.setText("New commits were pushed: press F5 to review the new version")
+        self.render_status()
 
     def closeEvent(self, event):
         if self.ai_run is not None:
