@@ -53,6 +53,17 @@ state at a glance, so you pull, switch and commit without opening each one.
   recent commits. Drafts, typed or suggested, are kept per repository until you commit.
 - Commit, commit and push, ignore files (by name, extension or folder), discard all or stash instead.
 
+<table>
+  <tr>
+    <td width="50%"><img src="docs/screenshots/edit.gif" alt="Editing a file in place, then saving: the diff updates at once"></td>
+    <td width="50%"><img src="docs/screenshots/stash.gif" alt="Ticking two files and stashing only them"></td>
+  </tr>
+  <tr>
+    <td align="center"><sub>Edit a file in place, save, the diff follows</sub></td>
+    <td align="center"><sub>Stash only the files you tick</sub></td>
+  </tr>
+</table>
+
 **Branches and history**
 - Commit graph of the current and base branches, commit details and per-file diffs.
 - Create, rename, delete and clean up merged branches; tags; stashes (apply, pop, drop).
@@ -88,7 +99,7 @@ state at a glance, so you pull, switch and commit without opening each one.
 - Proposals and drafts survive closing the window. A new AI review replaces the proposals of the last one.
 
 <p align="center">
-  <img src="docs/screenshots/review.png" alt="Merge request review with an AI proposal and a thread inline">
+  <img src="docs/screenshots/review.gif" alt="Merge request review: accept an AI proposal, comment a line, send the review">
 </p>
 
 **Per repository**
