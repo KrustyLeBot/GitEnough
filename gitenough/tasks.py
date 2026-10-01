@@ -17,9 +17,11 @@ class Tasks:
     repository (startup, focus, file watching) come in bursts of dozens.
     """
 
-    def __init__(self, ui_workers: int = 4, network_workers: int = 6, status_workers: int = 0):
+    def __init__(self, ui_workers: int = 4, network_workers: int = 16, status_workers: int = 0):
         # git status is mostly process start-up and disk reads: scale with the machine, within reason.
         status_workers = status_workers or max(4, min(10, (os.cpu_count() or 4) // 2))
+        # A fetch is about 3 s of waiting on the server, almost no local work: many at once finish a
+        # refresh of every repository several times sooner.
         self.ui = ThreadPoolExecutor(max_workers=ui_workers, thread_name_prefix="ui")
         self.network = ThreadPoolExecutor(max_workers=network_workers, thread_name_prefix="net")
         self.status = ThreadPoolExecutor(max_workers=status_workers, thread_name_prefix="status")

@@ -10,6 +10,7 @@ import re
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 from . import __version__, vault
@@ -68,7 +69,9 @@ def is_gitlab(host: str) -> bool:
 
 def gitlab_hosts(hosts) -> list[str]:
     """The GitLab servers among these hosts (network probe, worker thread)."""
-    return sorted({h.lower() for h in hosts if h and is_gitlab(h)})
+    hosts = sorted({h.lower() for h in hosts if h})
+    with ThreadPoolExecutor(max_workers=max(1, min(8, len(hosts)))) as pool:  # one probe per unknown host
+        return [h for h, ok in zip(hosts, pool.map(is_gitlab, hosts)) if ok]
 
 
 def mr_key(host: str, project: str, iid: int) -> str:
@@ -256,15 +259,19 @@ class Client:
             found.setdefault(mr.key, mr).reasons.add(reason)
 
         common = {"state": "opened", "scope": "all"}
-        for item in self.get_all("/merge_requests", 500, reviewer_username=me["username"], **common):
-            add(item, "reviewer")
-        for item in self.get_all("/merge_requests", 500, assignee_username=me["username"], **common):
-            add(item, "assignee")
-        for item in self.get_all("/merge_requests", 500, author_username=me["username"], **common):
-            add(item, "author")
-        for todo in self.get_all("/todos", 500, state="pending", type="MergeRequest"):
-            if todo.get("action_name") in ("mentioned", "directly_addressed") and todo.get("target"):
-                add(todo["target"], "mentioned")
+        queries = [("reviewer", "/merge_requests", {"reviewer_username": me["username"], **common}),
+                   ("assignee", "/merge_requests", {"assignee_username": me["username"], **common}),
+                   ("author", "/merge_requests", {"author_username": me["username"], **common}),
+                   ("mentioned", "/todos", {"state": "pending", "type": "MergeRequest"})]
+        # Independent lists: fetched at once, merged in a fixed order so the reasons do not depend on timing.
+        with ThreadPoolExecutor(max_workers=len(queries)) as pool:
+            results = list(pool.map(lambda q: self.get_all(q[1], 500, **q[2]), queries))
+        for (reason, _path, _params), items in zip(queries, results):
+            for item in items:
+                if reason != "mentioned":
+                    add(item, reason)
+                elif item.get("action_name") in ("mentioned", "directly_addressed") and item.get("target"):
+                    add(item["target"], reason)
         return list(found.values())
 
     def _mr(self, item: dict) -> MergeRequest:

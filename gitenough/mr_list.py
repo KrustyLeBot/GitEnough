@@ -1,6 +1,7 @@
 """Merge requests waiting for the user on GitLab (reviewer, assignee, mentioned, own), plus pasted links."""
 
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from PySide6.QtCore import QEvent, Qt, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices
@@ -34,32 +35,41 @@ def load(config, candidates: set[str]):
     servers = gitlab.gitlab_hosts(candidates)
     keys = {h: [k for k in vault.keys_of_host(h) if vault.get_token(k)] for h in servers}
     missing = [h for h in servers if not keys[h]]
-    # One pass per token: organizations on the same server may each have their own account.
-    for key in (k for h in servers for k in keys[h]):
-        try:
-            for mr in gitlab.Client.for_key(key).my_merge_requests():
-                if mr.key in found:
-                    found[mr.key].reasons |= mr.reasons
-                else:
-                    found[mr.key] = mr
-        except GitError as exc:
-            errors.append(f"{key}: {exc}")
-    for url in config.mr_links:
-        parsed = gitlab.parse_mr_url(url)
-        if not parsed:
-            continue
+    links = [(url, parsed) for url in config.mr_links if (parsed := gitlab.parse_mr_url(url))]
+
+    def mine(key):
+        return gitlab.Client.for_key(key).my_merge_requests()
+
+    def linked(parsed):
         host, project, iid = parsed
-        key = gitlab.mr_key(host, project, iid)
-        if key in found:
-            found[key].reasons.add("added")
-            continue
-        try:
-            mr = gitlab.Client.for_project(host, project).merge_request(project, iid)
-        except GitError as exc:
-            errors.append(f"{url}: {exc}")
-            mr = gitlab.MergeRequest(host, project, iid, title="(could not be loaded)", web_url=url)
-        mr.reasons.add("added")
-        found[mr.key] = mr
+        return gitlab.Client.for_project(host, project).merge_request(project, iid)
+
+    # One pass per token (organizations on the same server may each have their own account) and one
+    # request per pasted link, all at once: each is a round trip to a server.
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        lists = {key: pool.submit(mine, key) for h in servers for key in keys[h]}
+        singles = {url: pool.submit(linked, parsed) for url, parsed in links}
+        for key, future in lists.items():
+            try:
+                for mr in future.result():
+                    if mr.key in found:
+                        found[mr.key].reasons |= mr.reasons
+                    else:
+                        found[mr.key] = mr
+            except GitError as exc:
+                errors.append(f"{key}: {exc}")
+        for url, parsed in links:
+            key = gitlab.mr_key(*parsed)
+            if key in found:
+                found[key].reasons.add("added")
+                continue
+            try:
+                mr = singles[url].result()
+            except GitError as exc:
+                errors.append(f"{url}: {exc}")
+                mr = gitlab.MergeRequest(*parsed, title="(could not be loaded)", web_url=url)
+            mr.reasons.add("added")
+            found[mr.key] = mr
     return sorted(found.values(), key=lambda m: m.updated, reverse=True), errors, missing, servers
 
 

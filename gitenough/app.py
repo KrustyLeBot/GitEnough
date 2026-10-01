@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
                                QVBoxLayout, QWidget)
 
-from . import __version__, discovery, git_ops, ides, rebase, repo, repo_dialog, updater, vault
+from . import __version__, discovery, git_ops, ides, net, rebase, repo, repo_dialog, updater, vault
 from .branches_window import BranchesWindow
 from .changes_window import ChangesWindow
 from .compare_window import CompareWindow
@@ -1514,6 +1514,7 @@ def apply_style(app: QApplication):
 
 
 def main():
+    net.install()
     if sys.platform == "win32":
         import ctypes
         # Own taskbar identity so Windows shows our icon rather than python's.
