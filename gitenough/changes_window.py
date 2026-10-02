@@ -7,29 +7,35 @@ from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
 
-from . import ai, rebase, repo
+from . import ai, never_commit, rebase, repo
 from .config import Config
 from .diff_view import DiffView, parse_diff
 from .errors import explain
 from .file_editor import FileEditor
 from .file_view import ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
+from .never_commit_dialog import NeverCommitDialog
 from .repo import FileChange
 from .style import C
 from .widgets import ElidedLabel, ErrorDialog, ai_error_dialog, icon_button, keep_size
 
 
-def _load_diff(path: str, fc: FileChange, ws: bool, full: bool):
-    text = repo.change_diff(path, fc, ws, full)
+def _list(path: str, hide: bool):
+    staged, unstaged = repo.list_changes(path, hide)
+    return staged, unstaged, never_commit.summary(path) if never_commit.has_entries(path) else (0, 0, 0)
+
+
+def _load_diff(path: str, fc: FileChange, ws: bool, full: bool, hide: bool):
+    text = repo.change_diff(path, fc, ws, full, hide)
     data = parse_diff(text)
     data.signature = hash(text)  # lets a refresh skip re-rendering an unchanged diff
     return data
 
 
-def _content_search(path: str, files: list[FileChange], term: str) -> set:
+def _content_search(path: str, files: list[FileChange], term: str, hide: bool) -> set:
     term = term.lower()
     hits = set()
-    for key, text in repo.all_diffs(path, files).items():
+    for key, text in repo.all_diffs(path, files, hide).items():
         # Only look at added/removed lines, not at the diff headers.
         if any(term in line[1:].lower() for line in text.splitlines() if line[:1] in "+-"
                and not line.startswith(("+++", "---"))):
@@ -127,6 +133,9 @@ class ChangesWindow(QWidget):
         self.checked: set[str] = set()  # paths ticked for a stash, in either list
         self.busy = False
         self.last_refresh = 0.0
+        self.show_hidden = False  # never-commit lines shown in the list and the diffs
+        self.kept = (0, 0, 0)  # never_commit.summary
+        self._rebuild = False
 
         self.setWindowTitle(f"Changes · {project.name}")
         self.resize(1440, 860)
@@ -169,6 +178,7 @@ class ChangesWindow(QWidget):
         hl.addWidget(bash)
         hl.addWidget(folder)
         root.addWidget(header)
+        root.addWidget(self._kept_bar())
 
         split = QSplitter(Qt.Horizontal)
         split.setHandleWidth(1)
@@ -201,6 +211,48 @@ class ChangesWindow(QWidget):
         self.refresh()
 
     # ---------- layout ----------
+    def _kept_bar(self) -> QWidget:
+        """Shown while the repository has never-commit lines."""
+        self.kept_widget = QWidget()
+        self.kept_widget.setObjectName("diffNotes")
+        bar = QHBoxLayout(self.kept_widget)
+        bar.setContentsMargins(20, 6, 16, 6)
+        self.kept_label = QLabel("")
+        self.kept_label.setTextFormat(Qt.RichText)
+        self.kept_show = QCheckBox("Show them")
+        self.kept_show.setToolTip("List and diff the files with their never-commit lines (read only for those lines)")
+        self.kept_show.toggled.connect(self._toggle_hidden)
+        manage = QPushButton("Manage…")
+        manage.setObjectName("rowAction")
+        manage.clicked.connect(self.manage_kept)
+        bar.addWidget(self.kept_label, 1)
+        bar.addWidget(self.kept_show)
+        bar.addWidget(manage)
+        self.kept_widget.hide()
+        return self.kept_widget
+
+    def _update_kept(self):
+        found, files, lost = self.kept
+        self.kept_widget.setVisible(bool(found or lost))
+        text = (f"🔒 {found} never-commit change{'s' if found != 1 else ''} hidden in {files} "
+                f"file{'s' if files != 1 else ''}" if found else "🔒 No never-commit change in the files")
+        if lost:
+            text += (f" · <span style='color:{C['orange']}'>{lost} no longer match{'es' if lost == 1 else ''} "
+                     "the file</span>")
+        self.kept_label.setText(text)
+
+    def _toggle_hidden(self, on: bool):
+        self.show_hidden = on
+        self.diff_cache.clear()
+        self._rebuild = True  # same files maybe, other diffs
+        self.refresh()
+
+    def manage_kept(self):
+        NeverCommitDialog(self, self.path, self.p.name).exec()
+        self.diff_cache.clear()
+        self.refresh()
+        self.changed.emit()
+
     def _left_panel(self) -> QWidget:
         panel = QWidget()
         panel.setObjectName("sidePanel")
@@ -348,7 +400,7 @@ class ChangesWindow(QWidget):
     # ---------- data ----------
     def refresh(self):
         self.last_refresh = time.monotonic()
-        self.tasks.submit(repo.list_changes, self._on_list, self.path)
+        self.tasks.submit(_list, self._on_list, self.path, not self.show_hidden)
         branch = self.p.status.branch if self.p.status else None
         self.branch.setText(f"⎇  {branch}" if branch else "detached HEAD")
 
@@ -357,9 +409,15 @@ class ChangesWindow(QWidget):
             self.status.setText("Could not read the repository status")
             self.diff.set_message(str(error))
             return
-        if result == (self.staged, self.unstaged):
+        *lists, kept = result
+        if kept != self.kept:
+            self.kept = kept
+            self.diff_cache.clear()
+            self._update_kept()
+        elif tuple(lists) == (self.staged, self.unstaged) and not self._rebuild:
             return  # Nothing changed: leave lists, selection and diff alone.
-        self.staged, self.unstaged = result
+        self._rebuild = False
+        self.staged, self.unstaged = lists
         # Files committed, discarded or stashed elsewhere drop out of the ticked set.
         self.checked.intersection_update({f.path for f in self.staged + self.unstaged})
         self.diff_cache.clear()
@@ -425,7 +483,7 @@ class ChangesWindow(QWidget):
         self.search_gen += 1
         gen = self.search_gen
         self.tasks.submit(_content_search, lambda hits, err: self._on_content(gen, hits),
-                          self.path, self.staged + self.unstaged, term)
+                          self.path, self.staged + self.unstaged, term, not self.show_hidden)
 
     def _on_content(self, gen: int, hits):
         if gen != self.search_gen:
@@ -505,7 +563,8 @@ class ChangesWindow(QWidget):
         # Refreshing the file already on screen: keep it visible (and scrolled) until the new diff arrives.
         if not (self.diff.data is not None and self.diff.filename == fc.path):
             self.diff.set_message("Loading…", fc.path)
-        self.tasks.submit(_load_diff, lambda data, err: self._on_diff(fc, key, data, err), self.path, fc, ws, full)
+        self.tasks.submit(_load_diff, lambda data, err: self._on_diff(fc, key, data, err), self.path, fc, ws, full,
+                          not self.show_hidden)
 
     def _on_diff(self, fc: FileChange, key, data, error):
         if error:
@@ -527,8 +586,14 @@ class ChangesWindow(QWidget):
         # Partial patches only for plain modifications; new, deleted, renamed or untracked files go whole.
         if fc.code != "M" or fc.orig:
             self.diff.set_actions([])
+        elif fc.staged:
+            self.diff.set_actions(["unstage"])
+        elif self.show_hidden:
+            # The diff shows the never-commit lines, but patches apply to the file without them.
+            kept = any(e["file"] == fc.path for e in never_commit.entries(self.path))
+            self.diff.set_actions([] if kept else ["discard", "stage"])
         else:
-            self.diff.set_actions(["unstage"] if fc.staged else ["discard", "stage"])
+            self.diff.set_actions(["never", "discard", "stage"])
         term = self.search.text().strip()
         if term and self.in_content.isChecked():
             self.diff.set_find(term)
@@ -650,6 +715,12 @@ class ChangesWindow(QWidget):
             box.exec()
             if box.clickedButton() is not confirm:
                 return
+        if action == "never":
+            self.set_busy(True, f"Hiding the {what}…")
+            self.tasks.submit(never_commit.add, lambda n, err: self._after(
+                err, "Never commit", f"{n} change{'s' if n != 1 else ''} will never be committed" if n else ""),
+                self.path, fc.path, self.diff.full_file, selection, list(data.hunk_sizes))
+            return
         label = {"stage": "Staging", "unstage": "Unstaging", "discard": "Discarding"}[action] + f" {what}"
         self.set_busy(True, f"{label}…")
         self.tasks.submit(repo.apply_selection, lambda _r, err: self._after(err, label), self.path, fc,

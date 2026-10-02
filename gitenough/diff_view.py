@@ -29,8 +29,9 @@ WORD_BG = {"add": QColor("#1f6040"), "del": QColor("#74303a")}
 FILL_BRUSH = QBrush(QColor("#1f232c"), Qt.BDiagPattern)
 MATCH_BG = QColor("#5a4a16")
 MATCH_CURRENT_BG = QColor("#c08a1e")
-HUNK_LABELS = {"stage": "Stage hunk", "unstage": "Unstage hunk", "discard": "Discard hunk"}
-LINE_LABELS = {"stage": "Stage lines", "unstage": "Unstage lines", "discard": "Discard lines"}
+HUNK_LABELS = {"stage": "Stage hunk", "unstage": "Unstage hunk", "discard": "Discard hunk", "never": "Never commit"}
+LINE_LABELS = {"stage": "Stage lines", "unstage": "Unstage lines", "discard": "Discard lines",
+               "never": "Never commit lines"}
 
 
 @dataclass(slots=True)
@@ -589,7 +590,8 @@ class DiffEditor(QPlainTextEdit):
                 break
             if n < len(self.lines) and self.lines[n].kind == "hunk":
                 for rect, action in self._hunk_buttons(geo.top(), geo.height()):
-                    color = QColor(C["red"] if action == "discard" else C["accent"])
+                    color = QColor(C["red"] if action == "discard" else C["orange"] if action == "never"
+                                   else C["accent"])
                     fill = QColor(color)
                     fill.setAlpha(80 if self._hover == (n, action) else 34)
                     p.setPen(QPen(QColor(color.red(), color.green(), color.blue(), 110), 1))
@@ -774,7 +776,7 @@ class DiffView(QWidget):
         sl.addWidget(self.sel_label)
         sl.addStretch()
         self.sel_buttons: dict[str, QPushButton] = {}
-        for action in ("discard", "unstage", "stage"):
+        for action in ("never", "discard", "unstage", "stage"):
             btn = QPushButton(LINE_LABELS[action])
             btn.setObjectName("rowAction" if action != "discard" else "dangerSmall")
             btn.clicked.connect(lambda _=False, a=action: self._line_action(a))
@@ -829,7 +831,7 @@ class DiffView(QWidget):
         self.run_find()
 
     def set_actions(self, actions: list[str]):
-        """Hunk / line actions offered for the current diff ("stage", "unstage", "discard")."""
+        """Hunk / line actions offered for the current diff ("stage", "unstage", "discard", "never")."""
         self.actions = actions
         self._sync_actions()
 

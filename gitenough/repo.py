@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
+from . import never_commit
 from .git_ops import GitError, run_git, run_git_bytes
 
 FULL_CONTEXT = 100000
@@ -44,10 +45,12 @@ class History:
     head: str = ""
 
 
-def list_changes(path: str) -> tuple[list[FileChange], list[FileChange]]:
+def list_changes(path: str, hide: bool = True) -> tuple[list[FileChange], list[FileChange]]:
+    """Staged and unstaged files; hide leaves out files whose only unstaged change is never-commit lines."""
     out = run_git(["status", "--porcelain=v2", "-z", "--untracked-files=all"], cwd=path, timeout=60)
     entries = out.split("\0")
     staged, unstaged = [], []
+    index_blobs = {}  # file -> index blob, for unstaged modifications
     i = 0
     while i < len(entries):
         entry = entries[i]
@@ -70,6 +73,11 @@ def list_changes(path: str) -> tuple[list[FileChange], list[FileChange]]:
                 staged.append(FileChange(file, x, True, orig if x in "RC" else ""))
             if y != ".":
                 unstaged.append(FileChange(file, y, False))
+                if y == "M":
+                    index_blobs[file] = fields[7]
+    if hide and index_blobs and never_commit.has_entries(path):
+        gone = never_commit.hidden(path, list(index_blobs.items()))
+        unstaged = [f for f in unstaged if f.path not in gone]
     key = lambda f: f.path.lower()  # noqa: E731
     return sorted(staged, key=key), sorted(unstaged, key=key)
 
@@ -92,9 +100,13 @@ def _untracked_as_diff(path: str, file: str) -> str:
     return header + f"@@ -0,0 +1,{len(lines)} @@\n" + "".join(f"+{l}\n" for l in lines)
 
 
-def change_diff(path: str, fc: FileChange, ignore_ws: bool = False, full: bool = False) -> str:
+def change_diff(path: str, fc: FileChange, ignore_ws: bool = False, full: bool = False, hide: bool = True) -> str:
     if fc.code == "?":
         return _untracked_as_diff(path, fc.path)
+    if hide and not fc.staged and fc.code == "M" and never_commit.has_entries(path):
+        text = never_commit.clean_diff(path, fc.path, ignore_ws, FULL_CONTEXT if full else 3)
+        if text is not None:
+            return text
     args = ["diff", "--no-color", "--no-ext-diff", "-M", f"-U{FULL_CONTEXT if full else 3}"]
     if ignore_ws:
         args.append("-w")
@@ -107,7 +119,7 @@ def change_diff(path: str, fc: FileChange, ignore_ws: bool = False, full: bool =
 DIFF_SPLIT_RE = re.compile(r"(?m)^(?=diff --git )")
 
 
-def all_diffs(path: str, files: list[FileChange]) -> dict[tuple[bool, str], str]:
+def all_diffs(path: str, files: list[FileChange], hide: bool = True) -> dict[tuple[bool, str], str]:
     """Diff text of every changed file, keyed like FileChange.key, in two git calls in total."""
     result: dict[tuple[bool, str], str] = {}
     for staged in (False, True):
@@ -124,6 +136,11 @@ def all_diffs(path: str, files: list[FileChange]) -> dict[tuple[bool, str], str]
                     old = line[6:]
             name = new or old or chunk.split("\n", 1)[0].rsplit(" b/", 1)[-1]
             result[(staged, name)] = chunk
+    if hide and never_commit.has_entries(path):
+        kept = {e["file"] for e in never_commit.entries(path)}
+        for fc in files:
+            if not fc.staged and fc.code == "M" and fc.path in kept:
+                result[fc.key] = change_diff(path, fc)
     for fc in files:
         if fc.code == "?":
             try:
@@ -265,19 +282,21 @@ def apply_selection(path: str, fc: FileChange, full: bool, selection: dict, acti
     args = ["diff", "--no-color", "--no-ext-diff", f"-U{FULL_CONTEXT if full else 3}"]
     if fc.staged:
         args.append("--cached")
-    # Raw bytes, so CRLF line endings survive into the patch.
-    raw = run_git_bytes([*args, "--", fc.path], cwd=path, timeout=60)
-    header, hunks = _split_raw(raw)
-    if [len(h) - 1 for h in hunks] != shape:
-        raise GitError("The file changed since the diff was displayed. Refresh and try again.")
-    reverse = action != "stage"
-    patch = _build_patch(header, hunks, selection, reverse)
-    cmd = ["apply", "--recount", "--whitespace=nowarn"]
-    if action != "discard":
-        cmd.append("--cached")
-    if reverse:
-        cmd.append("--reverse")
-    run_git([*cmd, "-"], cwd=path, timeout=60, stdin=patch)
+    # The file is clean on disk meanwhile: the diff is the one shown, without its never-commit lines.
+    with never_commit.aside(path, [fc.path]):
+        # Raw bytes, so CRLF line endings survive into the patch.
+        raw = run_git_bytes([*args, "--", fc.path], cwd=path, timeout=60)
+        header, hunks = _split_raw(raw)
+        if [len(h) - 1 for h in hunks] != shape:
+            raise GitError("The file changed since the diff was displayed. Refresh and try again.")
+        reverse = action != "stage"
+        patch = _build_patch(header, hunks, selection, reverse)
+        cmd = ["apply", "--recount", "--whitespace=nowarn"]
+        if action != "discard":
+            cmd.append("--cached")
+        if reverse:
+            cmd.append("--reverse")
+        run_git([*cmd, "-"], cwd=path, timeout=60, stdin=patch)
 
 
 def discard_all(path: str) -> None:

@@ -143,9 +143,24 @@ def run_git(args: list[str], cwd: str | None = None, cred: Credential | None = N
     return out.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
 
 
+# Set by never_commit: lines kept out of commits are set aside around commands touching the working folder,
+# and files whose only change is such lines drop out of the status.
+WORKTREE_GUARD = None  # (cwd, args) -> context manager | None
+HIDDEN_FILTER = None  # (path, [(file, index blob)]) -> set of files
+
+
 def run_git_bytes(args: list[str], cwd: str | None = None, cred: Credential | None = None,
                   timeout: int = 120, stdin: bytes | None = None, env_extra: dict | None = None) -> bytes:
     """Raw stdout: patches must keep the exact bytes (CRLF line endings, encodings)."""
+    guard = WORKTREE_GUARD(cwd, args) if WORKTREE_GUARD and cwd else None
+    if guard is not None:
+        with guard:
+            return _run_git_bytes(args, cwd, cred, timeout, stdin, env_extra)
+    return _run_git_bytes(args, cwd, cred, timeout, stdin, env_extra)
+
+
+def _run_git_bytes(args: list[str], cwd: str | None, cred: Credential | None, timeout: int,
+                   stdin: bytes | None, env_extra: dict | None) -> bytes:
     env = os.environ.copy()
     env["GIT_TERMINAL_PROMPT"] = "0"
     # Background threads must never trigger Git Credential Manager popups.
@@ -289,7 +304,13 @@ def read_status(path: str) -> RepoStatus:
     out = run_git(["status", "--porcelain=v2", "--branch"], cwd=path, timeout=60)
     st = RepoStatus()
     has_ab = False
-    for line in out.splitlines():
+    lines = out.splitlines()
+    if HIDDEN_FILTER:
+        # Only unstaged modifications can be kept lines; "1 .M sub mH mI mW hH hI path".
+        candidates = [(p[8], p[7]) for p in (l.split(" ", 8) for l in lines) if len(p) == 9 and p[:2] == ["1", ".M"]]
+        hide = HIDDEN_FILTER(path, candidates) if candidates else set()
+        lines = [l for l in lines if not (l.startswith("1 .M ") and l.split(" ", 8)[-1] in hide)]
+    for line in lines:
         if line.startswith("# branch.head "):
             head = line[len("# branch.head "):]
             st.branch = None if head == "(detached)" else head
