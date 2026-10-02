@@ -1,11 +1,12 @@
 import json
+import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QFileDialog, QFrame, QHBoxLayout, QLabel, QLineEdit,
                                QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox, QTabWidget,
                                QVBoxLayout, QWidget)
 
-from . import ai, ai_review, review_skill, vault
+from . import ai, ai_review, ides, review_skill, vault
 from .about import AboutPage
 from .config import Config
 from .git_ops import Credential, GitError, is_http, parse_url, same_repo, test_access
@@ -220,6 +221,23 @@ class SettingsDialog(QDialog):
         self.watch_cb = QCheckBox("Refresh a repository as soon as its files change")
         self.watch_cb.setChecked(self.config.watch_files)
         lay.addWidget(self.watch_cb)
+        lay.addSpacing(12)
+        lay.addWidget(QLabel("Visual Studio for solutions"))
+        self.vs_combo = QComboBox()
+        self.vs_combo.addItem("Newest installed (stable channel)", ides.VS_LATEST)
+        for label, exe in ides.visual_studios():
+            self.vs_combo.addItem(label, exe)
+        if os.path.isfile(ides.VS_LAUNCHER):
+            self.vs_combo.addItem("Visual Studio Version Selector (the version the solution asks for)",
+                                  ides.VS_SELECTOR)
+        self.vs_combo.addItem("Windows default app for .sln", ides.VS_WINDOWS)
+        index = self.vs_combo.findData(self.config.visual_studio)
+        if index < 0:  # a version since uninstalled: shown, and the newest one is used meanwhile
+            self.vs_combo.addItem(f"{self.config.visual_studio} (not found)", self.config.visual_studio)
+            index = self.vs_combo.count() - 1
+        self.vs_combo.setCurrentIndex(index)
+        lay.addWidget(self.vs_combo)
+        lay.addWidget(self._hint("Opens the .sln and .slnx files of a repository."))
         lay.addSpacing(12)
         share = QHBoxLayout()
         export_btn = QPushButton("Export configuration…")
@@ -681,6 +699,7 @@ class SettingsDialog(QDialog):
         self.config.base_branches = [b.strip() for b in self.base_edit.text().split(",") if b.strip()]
         self.config.auto_fetch_minutes = self.fetch_spin.value()
         self.config.watch_files = self.watch_cb.isChecked()
+        self.config.visual_studio = self.vs_combo.currentData()
         vault.set_scopes(self.config.hosts)
         self.config.ai_commit_model = self._model_of(self.commit_model)
         self.config.ai_review_model = self._model_of(self.review_model)

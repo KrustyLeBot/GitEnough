@@ -38,6 +38,7 @@ class Config:
     mr_links: list[str] = field(default_factory=list)  # merge requests added by URL
     review_skill_source: str = ""  # GitLab project whose CI artifacts hold .skill files
     review_skill: str = ""  # name of the skill installed from it for the AI review ("" = built-in method)
+    visual_studio: str = ""  # devenv.exe opening solutions; "" newest, "selector" or "windows" (see ides)
 
     # ---------- commit message drafts, per repository folder (typed or suggested by Claude) ----------
     @staticmethod

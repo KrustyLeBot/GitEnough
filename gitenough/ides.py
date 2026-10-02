@@ -1,5 +1,6 @@
 """Locate and launch Visual Studio and VS Code."""
 
+import json
 import os
 import shutil
 import subprocess
@@ -11,23 +12,50 @@ VSWHERE = os.path.join(os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x
                        "Microsoft Visual Studio", "Installer", "vswhere.exe")
 
 
+VS_LAUNCHER = os.path.join(os.environ.get("CommonProgramFiles(x86)", r"C:\Program Files (x86)\Common Files"),
+                           "Microsoft Shared", "MSEnv", "VSLauncher.exe")
+VS_LATEST, VS_SELECTOR, VS_WINDOWS = "", "selector", "windows"  # config values besides a devenv.exe path
+
+
 @lru_cache(maxsize=1)
-def devenv_path() -> str | None:
-    """devenv.exe of the most recent Visual Studio installed (prerelease channels included)."""
+def visual_studios() -> list[tuple[str, str]]:
+    """(label, devenv.exe) of every Visual Studio installed, newest first (prerelease channels included)."""
     if not os.path.isfile(VSWHERE):
-        return None
-    cmd = [VSWHERE, "-latest", "-prerelease", "-products", "*", "-property", "productPath", "-nologo"]
+        return []
+    cmd = [VSWHERE, "-all", "-prerelease", "-products", "*", "-format", "json", "-utf8", "-nologo"]
     try:
-        out = subprocess.run(cmd, capture_output=True, text=True, timeout=15,
-                             creationflags=CREATE_NO_WINDOW).stdout.strip().splitlines()
-    except (OSError, subprocess.TimeoutExpired):
-        return None
-    return out[0] if out and os.path.isfile(out[0]) else None
+        out = subprocess.run(cmd, capture_output=True, timeout=15, creationflags=CREATE_NO_WINDOW).stdout
+        items = json.loads(out.decode("utf-8") or "[]")
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        return []
+    found = []
+    for item in items:
+        exe = item.get("productPath") or ""
+        if not os.path.isfile(exe):
+            continue
+        version = (item.get("catalog") or {}).get("productDisplayVersion") or item.get("installationVersion") or ""
+        label = item.get("displayName") or os.path.basename(os.path.dirname(exe))
+        # Two channels of one release share a display name: the version tells them apart.
+        found.append((f"{label} ({version})" if version else label, exe, item.get("installationVersion") or ""))
+    found.sort(key=lambda f: [int(x) for x in f[2].split(".") if x.isdigit()], reverse=True)
+    return [(label, exe) for label, exe, _v in found]
 
 
-def open_solution(solution: str) -> bool:
-    devenv = devenv_path()
+def devenv_path(choice: str = VS_LATEST) -> str | None:
+    """devenv.exe for the configured choice: a path when it is still installed, else the newest one."""
+    installs = visual_studios()
+    if choice not in (VS_LATEST, VS_SELECTOR, VS_WINDOWS) and os.path.isfile(choice):
+        return choice
+    stable = [exe for label, exe in installs if "insiders" not in label.lower() and "preview" not in label.lower()]
+    return (stable or [exe for _l, exe in installs] or [None])[0]
+
+
+def open_solution(solution: str, choice: str = VS_LATEST) -> bool:
     try:
+        if choice == VS_SELECTOR and os.path.isfile(VS_LAUNCHER):
+            subprocess.Popen([VS_LAUNCHER, solution])  # picks the version the solution file asks for
+            return True
+        devenv = None if choice == VS_WINDOWS else devenv_path(choice)
         if devenv:
             subprocess.Popen([devenv, solution])
         else:

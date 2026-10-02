@@ -462,7 +462,7 @@ class MainWindow(QMainWindow):
         self.reload()
         # Slow first-time lookups (pygments index, vswhere) paid in the background, not on first click.
         self.tasks.submit(warm_up_lexers, lambda _r, _e: None)
-        self.tasks.submit(ides.devenv_path, lambda _r, _e: None)
+        self.tasks.submit(ides.visual_studios, lambda _r, _e: None)
         self.fetch_timer = QTimer(self)
         self.fetch_timer.timeout.connect(self.auto_fetch)
         self.apply_auto_fetch()
@@ -1205,7 +1205,7 @@ class MainWindow(QMainWindow):
             menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()) if anchor else self.cursor().pos())
 
     def _launch_solution(self, p: Project, sol: str):
-        if not ides.open_solution(os.path.join(p.path, sol)):
+        if not ides.open_solution(os.path.join(p.path, sol), self.config.visual_studio):
             QMessageBox.warning(self, "Visual Studio", "Could not open the solution.")
 
     def open_code(self, path: str):
