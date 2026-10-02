@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
                                QVBoxLayout, QWidget)
 
-from . import __version__, discovery, git_ops, ides, net, rebase, repo, repo_dialog, updater, vault
+from . import __version__, discovery, git_ops, ides, net, never_commit, rebase, repo, repo_dialog, updater, vault
 from .branches_window import BranchesWindow
 from .changes_window import ChangesWindow
 from .compare_window import CompareWindow
@@ -1081,7 +1081,9 @@ class MainWindow(QMainWindow):
         if p.busy or not (p.snap and p.snap.kind == "repo"):
             return
         count = p.status.changes if p.status else 0
-        choice = confirm_discard_all(parent or self, p.name, count)
+        found, _files, _lost, whole = never_commit.summary(p.path) if never_commit.has_entries(p.path) else (0, 0, 0, 0)
+        kept = found + whole
+        choice = confirm_discard_all(parent or self, p.name, count, kept)
         if not choice:
             return
         fn, label = (repo.stash_all, "Stash") if choice == "stash" else (repo.discard_all, "Discard all")

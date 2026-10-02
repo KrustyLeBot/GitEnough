@@ -22,7 +22,7 @@ from .widgets import ElidedLabel, ErrorDialog, ai_error_dialog, icon_button, kee
 
 def _list(path: str, hide: bool):
     staged, unstaged = repo.list_changes(path, hide)
-    return staged, unstaged, never_commit.summary(path) if never_commit.has_entries(path) else (0, 0, 0)
+    return staged, unstaged, never_commit.summary(path) if never_commit.has_entries(path) else (0, 0, 0, 0)
 
 
 def _load_diff(path: str, fc: FileChange, ws: bool, full: bool, hide: bool):
@@ -134,7 +134,7 @@ class ChangesWindow(QWidget):
         self.busy = False
         self.last_refresh = 0.0
         self.show_hidden = False  # never-commit lines shown in the list and the diffs
-        self.kept = (0, 0, 0)  # never_commit.summary
+        self.kept = (0, 0, 0, 0)  # never_commit.summary
         self._rebuild = False
 
         self.setWindowTitle(f"Changes · {project.name}")
@@ -232,10 +232,15 @@ class ChangesWindow(QWidget):
         return self.kept_widget
 
     def _update_kept(self):
-        found, files, lost = self.kept
-        self.kept_widget.setVisible(bool(found or lost))
-        text = (f"🔒 {found} never-commit change{'s' if found != 1 else ''} hidden in {files} "
-                f"file{'s' if files != 1 else ''}" if found else "🔒 No never-commit change in the files")
+        found, files, lost, whole = self.kept
+        self.kept_widget.setVisible(bool(found or lost or whole))
+        parts = []
+        if found:
+            parts.append(f"{found} never-commit change{'s' if found != 1 else ''} hidden in {files} "
+                         f"file{'s' if files != 1 else ''}")
+        if whole:
+            parts.append(f"{whole} new file{'s' if whole != 1 else ''} never committed")
+        text = "🔒 " + (" · ".join(parts) or "No never-commit change in the files")
         if lost:
             text += (f" · <span style='color:{C['orange']}'>{lost} no longer match{'es' if lost == 1 else ''} "
                      "the file</span>")
@@ -700,6 +705,30 @@ class ChangesWindow(QWidget):
         self.tasks.submit(work, lambda target, err: self._after(
             err, "Ignore", f"Added to {os.path.relpath(target, self.path)}" if target else ""))
 
+    def never_files(self, files: list[FileChange]):
+        """Whole files kept out of commits: new files through info/exclude, modified ones as all their lines."""
+        if self.busy or not files:
+            return
+        n = len(files)
+
+        def work():
+            new = [f.path for f in files if f.code == "?"]
+            if new:
+                never_commit.add_files(self.path, new)
+            for f in files:
+                if f.code == "M":
+                    never_commit.add(self.path, f.path, False, None, None)
+
+        self.set_busy(True, f"Hiding {n} file{'s' if n != 1 else ''}…")
+        self.tasks.submit(work, lambda _r, err: self._after(
+            err, "Never commit", f"{n} file{'s' if n != 1 else ''} will never be committed"))
+
+    def allow_files(self, files: list[FileChange]):
+        never_commit.forget_files(self.path, [f.path for f in files])
+        self.diff_cache.clear()
+        self.refresh()
+        self.changed.emit()
+
     def apply_patch(self, selection: dict, action: str):
         fc, data = self.current, self.diff.data
         if self.busy or fc is None or data is None:
@@ -827,6 +856,12 @@ class ChangesWindow(QWidget):
         if view is self.unstaged_view:
             entries.append(("Discard changes…", lambda: self.discard(files), True))
             entries.append(("Ignore…", lambda: self.ignore(files), True))
+            kept_new = set(never_commit.kept_files(self.path))
+            if all(f.path in kept_new for f in files):
+                entries.append(("Allow committing", lambda: self.allow_files(files), True))
+            else:
+                entries.append(("Never commit" + ("" if single else f" {len(files)} files"),
+                                lambda: self.never_files(files), all(f.code in "?M" and not f.orig for f in files)))
         entries += [
             (None, None, True),
             ("File history && blame", lambda: self.main.open_file_history(self.p, fc.path), single and tracked),

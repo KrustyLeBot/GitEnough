@@ -48,8 +48,8 @@ def _bytes(line: str) -> bytes:
 
 # ---------- storage ----------
 
-def entries(path: str) -> list[dict]:
-    """[{file, a, b, line}], in application order. Cached until the file changes."""
+def _doc(path: str) -> dict:
+    """{"entries": [...], "files": [...]}, cached until the file changes."""
     key = _key(path)
     if key not in _recovered:
         _recovered.add(key)
@@ -59,31 +59,90 @@ def entries(path: str) -> list[dict]:
         mtime = os.path.getmtime(store)
     except OSError:
         _cache.pop(key, None)
-        return []
+        return {"entries": [], "files": []}
     cached = _cache.get(key)
     if cached and cached[0] == mtime:
         return cached[1]
     try:
         with open(store, encoding="utf-8") as fh:
-            items = [e for e in json.load(fh).get("entries", []) if e.get("file") and "a" in e and "b" in e]
+            raw = json.load(fh)
+        doc = {"entries": [e for e in raw.get("entries", []) if e.get("file") and "a" in e and "b" in e],
+               "files": [f for f in raw.get("files", []) if isinstance(f, str) and f]}
     except (OSError, ValueError, AttributeError):
-        items = []
-    _cache[key] = (mtime, items)
-    return items
+        doc = {"entries": [], "files": []}
+    _cache[key] = (mtime, doc)
+    return doc
 
 
-def _save(path: str, items: list[dict]) -> None:
+def entries(path: str) -> list[dict]:
+    """[{file, a, b, line}], in application order."""
+    return _doc(path)["entries"]
+
+
+def kept_files(path: str) -> list[str]:
+    """New files never committed: listed in .git/info/exclude, so git leaves them out of add, stash and clean."""
+    return _doc(path)["files"]
+
+
+def _save(path: str, items: list[dict] | None = None, files: list[str] | None = None) -> None:
+    doc = _doc(path)
+    doc = {"entries": doc["entries"] if items is None else items, "files": doc["files"] if files is None else files}
     store = _store(path)
     os.makedirs(os.path.dirname(store), exist_ok=True)
     tmp = store + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump({"entries": items}, fh, indent=1)
+        json.dump(doc, fh, indent=1)
     os.replace(tmp, store)
     _cache.pop(_key(path), None)
+    if files is not None:
+        _write_exclude(path, files)
 
 
 def has_entries(path: str) -> bool:
-    return os.path.exists(_store(path)) and bool(entries(path))
+    if not os.path.exists(_store(path)):
+        return False
+    doc = _doc(path)
+    return bool(doc["entries"] or doc["files"])
+
+
+# ---------- whole new files ----------
+
+EXCLUDE_BEGIN = "# >>> GitEnough never-commit files (managed, edits are overwritten)"
+EXCLUDE_END = "# <<< GitEnough never-commit files"
+
+
+def _pattern(file: str) -> str:
+    """An exclude line matching exactly this path from the repository root."""
+    escaped = re.sub(r"([\\*?\[\]!#])", r"\\\1", file)
+    if escaped.endswith(" "):
+        escaped = escaped[:-1] + "\\ "
+    return "/" + escaped
+
+
+def _write_exclude(path: str, files: list[str]) -> None:
+    exclude = os.path.join(git_ops.common_dir(path), "info", "exclude")
+    try:
+        with open(exclude, encoding="utf-8") as fh:
+            text = fh.read()
+    except OSError:
+        text = ""
+    block = re.compile(re.escape(EXCLUDE_BEGIN) + r".*?" + re.escape(EXCLUDE_END) + r"\n?", re.S)
+    text = block.sub("", text)
+    if files:
+        if text and not text.endswith("\n"):
+            text += "\n"
+        text += "\n".join([EXCLUDE_BEGIN, *(_pattern(f) for f in sorted(files)), EXCLUDE_END]) + "\n"
+    os.makedirs(os.path.dirname(exclude), exist_ok=True)
+    with open(exclude, "w", encoding="utf-8") as fh:
+        fh.write(text)
+
+
+def add_files(path: str, files: list[str]) -> None:
+    _save(path, files=sorted(set(kept_files(path)) | set(files)))
+
+
+def forget_files(path: str, files: list[str]) -> None:
+    _save(path, files=[f for f in kept_files(path) if f not in set(files)])
 
 
 # ---------- line blocks ----------
@@ -205,8 +264,8 @@ def clean(path: str, file: str) -> tuple[bytes | None, list[dict]]:
     return _reverse(data, mine)
 
 
-def summary(path: str) -> tuple[int, int, int]:
-    """(entries found in their file, files holding them, entries that no longer match)."""
+def summary(path: str) -> tuple[int, int, int, int]:
+    """(entries found in their file, files holding them, entries that no longer match, whole new files)."""
     items = entries(path)
     found, files = 0, set()
     for file in {e["file"] for e in items}:
@@ -214,7 +273,8 @@ def summary(path: str) -> tuple[int, int, int]:
         if n:
             found += n
             files.add(file)
-    return found, len(files), len(items) - found
+    whole = sum(1 for f in kept_files(path) if os.path.exists(os.path.join(path, f)))
+    return found, len(files), len(items) - found, whole
 
 
 def status(path: str) -> list[tuple[dict, bool]]:
@@ -410,11 +470,12 @@ git_ops.HIDDEN_FILTER = hidden_filter
 
 # ---------- marking lines ----------
 
-def add(path: str, file: str, full: bool, selection: dict, shape: list[int]) -> int:
+def add(path: str, file: str, full: bool, selection: dict | None, shape: list[int] | None) -> int:
     """Keeps the selected hunks / lines of the unstaged diff out of every commit; returns the entries added.
 
     selection maps a hunk index to None (whole hunk) or to the set of its line indexes, as in
-    repo.apply_selection; shape is the number of body lines per hunk in the diff the user saw.
+    repo.apply_selection, or is None for every change of the file; shape is the number of body lines per hunk
+    in the diff the user saw (None: not checked).
     """
     with aside(path, [file]):  # the diff below is then the one shown: without the lines kept before
         raw = run_git_bytes(["diff", "--no-color", "--no-ext-diff", f"-U{100000 if full else CONTEXT}",
@@ -427,7 +488,9 @@ def add(path: str, file: str, full: bool, selection: dict, shape: list[int]) -> 
             hunks[-1].append(_text(line.rstrip(b"\r")))
     if hunks and hunks[-1][-1] == "":
         hunks[-1].pop()
-    if [len(h) - 1 for h in hunks] != shape:
+    if selection is None:
+        selection = {i: None for i in range(len(hunks))}
+    elif [len(h) - 1 for h in hunks] != shape:
         raise GitError("The file changed since the diff was displayed. Refresh and try again.")
     new_entries = []
     for idx, hunk in enumerate(hunks):

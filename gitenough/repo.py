@@ -78,6 +78,11 @@ def list_changes(path: str, hide: bool = True) -> tuple[list[FileChange], list[F
     if hide and index_blobs and never_commit.has_entries(path):
         gone = never_commit.hidden(path, list(index_blobs.items()))
         unstaged = [f for f in unstaged if f.path not in gone]
+    if not hide:
+        # New files kept out of commits are ignored by git (info/exclude): listed on demand only.
+        listed = {f.path for f in unstaged}
+        unstaged += [FileChange(f, "?", False) for f in never_commit.kept_files(path)
+                     if f not in listed and os.path.isfile(os.path.join(path, f))]
     key = lambda f: f.path.lower()  # noqa: E731
     return sorted(staged, key=key), sorted(unstaged, key=key)
 

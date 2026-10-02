@@ -284,13 +284,17 @@ def file_list() -> QListWidget:
     return lw
 
 
-def confirm_discard_all(parent, name: str, count: int) -> str | None:
-    """Returns "discard", "stash" or None."""
+def confirm_discard_all(parent, name: str, count: int, kept: int = 0) -> str | None:
+    """Returns "discard", "stash" or None. kept: never-commit changes, which both choices leave in place."""
+    one = kept == 1
     box = QMessageBox(QMessageBox.Warning, "Discard all changes",
                       f"Discard every local change in {name}?\n\n"
                       f"{count} file(s): staged, unstaged and untracked changes are all lost. "
                       "Ignored files are kept. This cannot be undone.\n\n"
-                      "Stash instead puts them aside; restore them later with git stash pop.",
+                      "Stash instead puts them aside; restore them later with git stash pop."
+                      + (f"\n\n🔒 {kept} never-commit change{'' if one else 's'} stay{'s' if one else ''} in the "
+                         "files: neither discarded nor stashed. To discard them too, allow committing them first "
+                         "(Changes window, Manage…)." if kept else ""),
                       QMessageBox.Cancel, parent)
     stash = box.addButton("Stash instead", QMessageBox.AcceptRole)
     discard = box.addButton("Discard everything", QMessageBox.DestructiveRole)

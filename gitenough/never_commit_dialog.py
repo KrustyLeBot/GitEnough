@@ -70,7 +70,14 @@ class NeverCommitDialog(QDialog):
     def load(self):
         self.tree.clear()
         self.items: list[tuple[dict, bool]] = never_commit.status(self.path)
+        # Whole new files, left out of git through info/exclude: always "kept".
+        self.items += [({"file": f, "whole": True}, True) for f in never_commit.kept_files(self.path)]
         for i, (e, found) in enumerate(self.items):
+            if e.get("whole"):
+                item = QTreeWidgetItem([e["file"], "", "whole new file", "kept"])
+                item.setData(0, Qt.UserRole, i)
+                self.tree.addTopLevelItem(item)
+                continue
             _old, new, number = _changed(e)
             first = next((t.strip() for t in new if t.strip()), "(lines removed)")
             item = QTreeWidgetItem([e["file"], str(number), first,
@@ -92,6 +99,9 @@ class NeverCommitDialog(QDialog):
         self.put_back.setEnabled(any(not found for _e, found in chosen))
         text = []
         for e, _found in chosen[:20]:
+            if e.get("whole"):
+                text += [f"{e['file']}  (whole new file, listed in .git/info/exclude)", ""]
+                continue
             old, new, number = _changed(e)
             text.append(f"{e['file']}  (line {number})")
             text += [f"- {t}" for t in old] + [f"+ {t}" for t in new] + [""]
@@ -111,7 +121,8 @@ class NeverCommitDialog(QDialog):
         self.load()
 
     def _allow(self):
-        chosen = [e for e, _found in self._chosen()]
+        chosen = [e for e, _found in self._chosen() if not e.get("whole")]
+        whole = [e["file"] for e, _found in self._chosen() if e.get("whole")]
         lost = sum(1 for _e, found in self._chosen() if not found)
         if lost:
             box = QMessageBox(QMessageBox.Warning, "Allow committing",
@@ -121,5 +132,8 @@ class NeverCommitDialog(QDialog):
             box.exec()
             if box.clickedButton() is not confirm:
                 return
-        never_commit.forget(self.path, chosen)
+        if chosen:
+            never_commit.forget(self.path, chosen)
+        if whole:
+            never_commit.forget_files(self.path, whole)
         self.load()
