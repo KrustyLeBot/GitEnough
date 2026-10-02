@@ -51,6 +51,8 @@ state at a glance, so you pull, switch and commit without opening each one.
   stash brings staged parts back staged.
 - **Suggest a commit message** from the staged diff with Claude (Haiku by default), in the style of your
   recent commits. Drafts, typed or suggested, are kept per repository until you commit.
+- **Never commit** a hunk, selected lines or a whole file: a local debug flag or config line stays on disk but
+  leaves the change list, the stashes and every commit, and follows you through pulls and branch switches.
 - Commit, commit and push, ignore files (by name, extension or folder), discard all or stash instead.
 
 <table>
@@ -111,7 +113,8 @@ state at a glance, so you pull, switch and commit without opening each one.
 
 **Per repository**
 - Change the remote URL (moving to another server takes a few seconds), custom name and base branch.
-- Open in Visual Studio (`.sln` / `.slnx`), VS Code, Git Bash, the file explorer or the browser.
+- One **Open in** menu per repository: Explorer, Git Bash, PowerShell, Visual Studio (`.sln` / `.slnx`, with the
+  version chosen in Settings), VS Code, and the repository or its branch in the browser.
 - Hide a repository, or delete its folder to the Recycle Bin after a check for unpushed work.
 
 <p align="center">

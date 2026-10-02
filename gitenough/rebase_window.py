@@ -12,7 +12,8 @@ from . import git_ops, rebase
 from .errors import explain
 from .style import C
 from .tree_window import rel_time
-from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
+from .widgets import ElidedLabel, ErrorDialog, keep_size
+from .open_menu import OpenButton
 
 
 def _box(text: str, color: str) -> QLabel:
@@ -59,8 +60,7 @@ class RebaseWindow(QWidget):
         self.status.setObjectName("muted")
         self.status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         hl.addWidget(self.status, 1)
-        bash = icon_button("terminal", "Open Git Bash here")
-        bash.clicked.connect(lambda: main.open_bash(self.path))
+        bash = OpenButton(main, project)
         hl.addWidget(bash)
         root.addWidget(header)
 

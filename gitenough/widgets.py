@@ -120,6 +120,21 @@ def _draw(name: str, p: QPainter, s: float):
         p.drawRoundedRect(QRectF(2.5 * s, 4 * s, 15 * s, 12 * s), 2 * s, 2 * s)
         p.drawPolyline([QPointF(6 * s, 8 * s), QPointF(8.5 * s, 10 * s), QPointF(6 * s, 12 * s)])
         p.drawLine(QPointF(10 * s, 12.5 * s), QPointF(14 * s, 12.5 * s))
+    elif name == "powershell":
+        # Slanted window, like the PowerShell logo.
+        p.drawPolygon([QPointF(5 * s, 4 * s), QPointF(18 * s, 4 * s), QPointF(15 * s, 16 * s), QPointF(2 * s, 16 * s)])
+        p.drawPolyline([QPointF(6.5 * s, 7.5 * s), QPointF(9.5 * s, 10 * s), QPointF(5.5 * s, 12.5 * s)])
+        p.drawLine(QPointF(10 * s, 12.5 * s), QPointF(13 * s, 12.5 * s))
+    elif name == "open":
+        # A window with an arrow leaving it.
+        path = QPainterPath(QPointF(9 * s, 4 * s))
+        path.lineTo(4 * s, 4 * s)
+        path.lineTo(4 * s, 16 * s)
+        path.lineTo(16 * s, 16 * s)
+        path.lineTo(16 * s, 11 * s)
+        p.drawPath(path)
+        p.drawLine(QPointF(9.5 * s, 10.5 * s), QPointF(16.5 * s, 3.5 * s))
+        p.drawPolyline([QPointF(11.5 * s, 3.5 * s), QPointF(16.5 * s, 3.5 * s), QPointF(16.5 * s, 8.5 * s)])
 
 
 @lru_cache(maxsize=None)

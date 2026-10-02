@@ -18,6 +18,7 @@ from .never_commit_dialog import NeverCommitDialog
 from .repo import FileChange
 from .style import C
 from .widgets import ElidedLabel, ErrorDialog, ai_error_dialog, icon_button, keep_size
+from .open_menu import OpenButton
 
 
 def _list(path: str, hide: bool):
@@ -170,13 +171,8 @@ class ChangesWindow(QWidget):
         hl.addSpacing(6)
         refresh = icon_button("refresh", "Refresh (F5)")
         refresh.clicked.connect(self.refresh)
-        bash = icon_button("terminal", "Open Git Bash here")
-        bash.clicked.connect(lambda: self.main.open_bash(self.path))
-        folder = icon_button("folder", "Open folder")
-        folder.clicked.connect(lambda: os.startfile(self.path))
         hl.addWidget(refresh)
-        hl.addWidget(bash)
-        hl.addWidget(folder)
+        hl.addWidget(OpenButton(self.main, project))
         root.addWidget(header)
         root.addWidget(self._kept_bar())
 

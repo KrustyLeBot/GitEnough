@@ -15,6 +15,7 @@ from .repo import Commit, FileChange, History
 from .style import C
 from .file_view import ExtensionBar, FileView, extension
 from .widgets import icon_button, keep_size
+from .open_menu import OpenButton
 
 LANE_W = 14
 ROW_H = 28
@@ -329,8 +330,7 @@ class TreeWindow(QWidget):
         hl.addWidget(self.search)
         refresh = icon_button("refresh", "Refresh (F5)")
         refresh.clicked.connect(self.refresh)
-        bash = icon_button("terminal", "Open Git Bash here")
-        bash.clicked.connect(lambda: self.main.open_bash(self.path))
+        bash = OpenButton(self.main, project)
         hl.addWidget(refresh)
         hl.addWidget(bash)
         root.addWidget(header)

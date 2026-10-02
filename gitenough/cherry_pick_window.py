@@ -10,7 +10,8 @@ from .errors import explain
 from .git_ops import run_git
 from .rebase_window import _box
 from .style import C
-from .widgets import ElidedLabel, ErrorDialog, icon_button, keep_size
+from .widgets import ElidedLabel, ErrorDialog, keep_size
+from .open_menu import OpenButton
 
 
 class CherryPickWindow(QWidget):
@@ -43,8 +44,7 @@ class CherryPickWindow(QWidget):
         self.status.setObjectName("muted")
         self.status.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         hl.addWidget(self.status, 1)
-        bash = icon_button("terminal", "Open Git Bash here")
-        bash.clicked.connect(lambda: main.open_bash(self.path))
+        bash = OpenButton(main, project)
         hl.addWidget(bash)
         root.addWidget(header)
 

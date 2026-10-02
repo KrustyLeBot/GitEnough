@@ -117,6 +117,7 @@ QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ width: 0; ba
 QToolButton {{ background: transparent; border: none; border-radius: 6px; padding: 4px; }}
 QToolButton:hover {{ background: {C['hover']}; }}
 QToolButton:pressed {{ background: {C['surface']}; }}
+QToolButton::menu-indicator {{ image: none; width: 0; }}
 
 QMenu {{ background: {C['surface2']}; border: 1px solid {C['border']}; border-radius: 8px; padding: 6px; }}
 QMenu::item {{ padding: 6px 22px 6px 14px; border-radius: 5px; }}

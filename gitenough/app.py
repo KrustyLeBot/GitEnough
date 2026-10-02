@@ -13,7 +13,8 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QButtonGroup, QC
                                QProgressBar, QPushButton, QSizePolicy, QStackedWidget, QTableWidget,
                                QVBoxLayout, QWidget)
 
-from . import __version__, discovery, git_ops, ides, net, never_commit, rebase, repo, repo_dialog, updater, vault
+from . import (__version__, discovery, git_ops, ides, net, never_commit, open_menu, rebase, repo, repo_dialog, updater,
+               vault)
 from .branches_window import BranchesWindow
 from .changes_window import ChangesWindow
 from .compare_window import CompareWindow
@@ -31,7 +32,8 @@ from .style import QSS, C, app_icon, arrow_pixmap, check_pixmap, chevron_pixmap,
 from .tasks import Tasks
 from .update_toast import UpdateToast
 from .watcher import RepoWatcher
-from .widgets import ErrorDialog, NoWheelComboBox, confirm_discard_all, icon_button, set_css
+from .open_menu import OpenButton
+from .widgets import ErrorDialog, NoWheelComboBox, confirm_discard_all, icon, icon_button, set_css
 
 FOCUS_REFRESH_DELAY = 4.0
 
@@ -228,10 +230,7 @@ class Row:
         self.stash.clicked.connect(lambda: win.open_stashes(p))
         self.manage = icon_button("branches", "Manage branches")
         self.manage.clicked.connect(lambda: win.open_branches(p))
-        self.vs = icon_button("vs", "Open solution in Visual Studio")
-        self.vs.clicked.connect(lambda: win.open_solution(p, self.vs))
-        self.code = icon_button("code", "Open folder in VS Code")
-        self.code.clicked.connect(lambda: win.open_code(p.path))
+        self.open = OpenButton(win, p)
 
         self.action = QPushButton()
         self.action.setObjectName("rowAction")
@@ -239,12 +238,6 @@ class Row:
         self.action.clicked.connect(self.on_action)
         self.tree = icon_button("tree", "History (commit graph)")
         self.tree.clicked.connect(lambda: win.open_tree(p))
-        self.bash = icon_button("terminal", "Open Git Bash here")
-        self.bash.clicked.connect(lambda: win.open_bash(p.path))
-        self.folder = icon_button("folder", "Open folder")
-        self.folder.clicked.connect(lambda: win.open_path(p.path))
-        self.web = icon_button("globe", "Open in browser")
-        self.web.clicked.connect(lambda: win.open_web(p))
         self.gear = icon_button("gear", "Repository settings: remote URL, name, base branch, hide or delete")
         self.gear.clicked.connect(lambda: win.open_repo_settings(p))
 
@@ -257,14 +250,13 @@ class Row:
         self.cells = [cell(self.pin, self.check, spacing=2), cell(info), cell(self.pill),
                       cell(self.branch, self.manage, self.compare, self.base_flag, spacing=3),
                       cell(self.changes, self.stash, spacing=6),
-                      cell(self.action, self.tree, self.bash, self.vs, self.code, self.folder, self.web, self.gear,
-                           spacing=1)]
+                      cell(self.action, self.tree, self.open, self.gear, spacing=1)]
         self.cells[1].layout().setStretch(0, 1)
         # Rows are disabled while busy; a disabled focused widget hands focus to the next one in the
         # table, and the table then scrolls to it (back to the top). Mouse-only widgets avoid that.
         for widget in (self.pin, self.compare, self.base_flag, self.check, self.pill, self.branch, self.manage, self.changes,
                        self.stash, self.action,
-                       self.tree, self.bash, self.vs, self.code, self.folder, self.web, self.gear):
+                       self.tree, self.open, self.gear):
             widget.setFocusPolicy(Qt.NoFocus)
 
     @property
@@ -411,21 +403,10 @@ class Row:
         self.action.setEnabled(not p.busy and p.snap is not None and p.snap.kind != "notrepo"
                                and self.action_kind() != "none")
         is_repo = p.snap is not None and p.snap.kind == "repo"
-        self.folder.setVisible(p.snap is not None and not p.missing)
         # Visibility only here, once parented: setVisible(True) on a parentless widget opens it as a window.
-        self.web.setVisible(git_ops.web_url(p.url) is not None)
+        self.open.setVisible(self.open.available())
         self.tree.setVisible(is_repo)
-        self.bash.setVisible(is_repo)
         self.manage.setVisible(is_repo)
-        self.vs.setVisible(is_repo and bool(p.snap.solutions))
-        sols = p.snap.solutions if is_repo else []
-        # With several solutions the button shows their count and opens a picker.
-        self.vs.setToolButtonStyle(Qt.ToolButtonTextBesideIcon if len(sols) > 1 else Qt.ToolButtonIconOnly)
-        self.vs.setText(str(len(sols)) if len(sols) > 1 else "")
-        if sols:
-            self.vs.setToolTip(f"Open {sols[0]} in Visual Studio" if len(sols) == 1
-                               else f"{len(sols)} solutions: pick one to open in Visual Studio")
-        self.code.setVisible(is_repo and bool(ides.vscode_path()))
         n = p.snap.stashes if is_repo else 0
         self.stash.setVisible(bool(n))
         self.stash.setText(f"{n} stashed")
@@ -1077,6 +1058,10 @@ class MainWindow(QMainWindow):
         if not open_git_bash(path):
             QMessageBox.warning(self, "Git Bash", "Git Bash was not found next to git.exe.")
 
+    def open_powershell(self, path: str):
+        if not open_menu.open_powershell(path):
+            QMessageBox.warning(self, "PowerShell", "Neither pwsh.exe nor powershell.exe was found in PATH.")
+
     def discard_all(self, p: Project, parent=None):
         if p.busy or not (p.snap and p.snap.kind == "repo"):
             return
@@ -1194,18 +1179,6 @@ class MainWindow(QMainWindow):
             if getattr(win, "p", None) is p and win is not exclude and not isinstance(win, TreeWindow):
                 win.refresh()
 
-    def open_solution(self, p: Project, anchor=None):
-        sols = p.snap.solutions if p.snap else []
-        if len(sols) == 1:
-            self._launch_solution(p, sols[0])
-        elif sols:
-            menu = QMenu(self)
-            for sol in sols:
-                act = QAction(sol, menu)
-                act.triggered.connect(lambda _=False, sol=sol: self._launch_solution(p, sol))
-                menu.addAction(act)
-            menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()) if anchor else self.cursor().pos())
-
     def _launch_solution(self, p: Project, sol: str):
         if not ides.open_solution(os.path.join(p.path, sol), self.config.visual_studio):
             QMessageBox.warning(self, "Visual Studio", "Could not open the solution.")
@@ -1317,20 +1290,11 @@ class MainWindow(QMainWindow):
             (None, None, True),
             (f"Abort {p.snap.op}…" if p.snap and p.snap.op else "Abort operation…",
              lambda: self.abort_operation(p), bool(p.snap and p.snap.op)),
-            ("Open solution in Visual Studio", lambda: self.open_solution(p), bool(is_repo and p.snap.solutions)),
             (None, None, True),
             ("Publish branch", lambda: self.push_project(p),
              bool(p.status and p.status.branch and (not p.status.upstream or p.status.upstream_gone))),
             (None, None, True),
-            ("Open in browser", lambda: self.open_web(p), git_ops.web_url(p.url) is not None),
-            ("Open branch in browser", lambda: self.open_web(p, branch=True),
-             bool(git_ops.web_url(p.url) and p.status and p.status.branch
-                  and p.status.branch in p.snap.on_origin)),
-            (None, None, True),
-            ("Open folder", lambda: self.open_path(p.path), not p.missing),
-            ("Open Git Bash", lambda: self.open_bash(p.path), is_repo),
-            ("Open in terminal", lambda: open_terminal(p.path), is_repo),
-            ("Open in VS Code", lambda: self.open_code(p.path), is_repo and bool(ides.vscode_path())),
+            ("OPEN", None, True),  # the "Open in" submenu
             (None, None, True),
             ("Copy path", lambda: QGuiApplication.clipboard().setText(p.path), True),
             ("Copy URL", lambda: QGuiApplication.clipboard().setText(p.url), True),
@@ -1344,6 +1308,11 @@ class MainWindow(QMainWindow):
         for text, fn, enabled in actions:
             if text is None:
                 menu.addSeparator()
+                continue
+            if text == "OPEN":
+                sub = menu.addMenu(icon("open"), "Open in")
+                open_menu.fill(sub, self, p)
+                sub.setEnabled(not sub.isEmpty())
                 continue
             act = QAction(text, menu)
             act.setEnabled(enabled)
@@ -1482,13 +1451,6 @@ def open_git_bash(path: str) -> bool:
         return False
     subprocess.Popen([exe, f"--cd={path}"])
     return True
-
-
-def open_terminal(path: str):
-    if shutil.which("wt"):
-        subprocess.Popen(["wt", "-d", path])
-    else:
-        subprocess.Popen(["cmd.exe", "/K"], cwd=path, creationflags=subprocess.CREATE_NEW_CONSOLE)
 
 
 def apply_style(app: QApplication):
