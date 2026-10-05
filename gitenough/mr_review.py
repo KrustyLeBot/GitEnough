@@ -150,6 +150,8 @@ class ReviewWindow(QWidget):
         self.files: list[gitlab.FileDiff] = []
         self.by_path: dict[str, gitlab.FileDiff] = {}
         self.parsed: dict[str, object] = {}
+        # Diffs computed with git for the options GitLab's diff cannot give: (path, ignore ws, full file) -> text
+        self.variants: dict[tuple[str, bool, bool], str] = {}
         self.discussions: list[gitlab.Discussion] = []
         self.current = ""  # path shown, or OVERVIEW
         self.composer = None  # (path, side, line) of the comment being written
@@ -377,6 +379,7 @@ class ReviewWindow(QWidget):
         self.client, self.mr, self.files, self.discussions, self.remote_drafts = result
         self.by_path = {f.path: f for f in self.files}
         self.parsed.clear()
+        self.variants.clear()
         # A file viewed before a push that changed it is unviewed again.
         self.viewed = {p: sig for p, sig in self.viewed.items() if p in self.by_path
                        and self.by_path[p].signature == sig}
@@ -528,9 +531,21 @@ class ReviewWindow(QWidget):
         if not self.view.current_file() or self.view.current_file().path != path:
             self.view.select_path(path)
         self.diff.set_inline(self._thread_widgets(path), render=False)
+        ws, full = self.diff.ignore_ws, self.diff.full_file
         if f.too_large and not f.diff:
             self.diff.set_message("GitLab does not send this diff (too large): loading it with git…", path)
             self._load_local_diff(f)
+        elif ws or full:
+            key = (path, ws, full)
+            if key in self.variants:
+                data = self.parsed.get(key)
+                if data is None:
+                    data = self.parsed[key] = parse_diff(self.variants[key])
+                self.diff.set_diff(path, data, keep_scroll=keep)
+            else:
+                if self.diff.data is None or self.diff.filename != path:
+                    self.diff.set_message("Loading the whole file with git…" if full else "Loading…", path)
+                self._load_variant(f, ws, full)
         else:
             data = self.parsed.get(path)
             if data is None:
@@ -539,19 +554,41 @@ class ReviewWindow(QWidget):
         self._markers()
         self.update_counts()
 
+    @staticmethod
+    def _git_diff(mr, cred, f: gitlab.FileDiff, *options: str) -> str:
+        """The merge request's diff of one file, computed in GitEnough's review clone (worker thread)."""
+        repo = ai_review.cache_repo(mr.host, mr.project, cred)
+        try:
+            run_git(["cat-file", "-e", f"{mr.head_sha}^{{commit}}"], cwd=repo, timeout=15)
+        except GitError:
+            run_git(["fetch", "--no-tags", "origin", f"refs/merge-requests/{mr.iid}/head"], cwd=repo,
+                    cred=cred, timeout=300)
+        paths = [f.old_path, f.new_path] if f.renamed else [f.path]
+        return run_git(["diff", "--no-color", "--no-ext-diff", "-M", *options, mr.base_sha, mr.head_sha, "--", *paths],
+                       cwd=repo, cred=cred, timeout=120)
+
+    def _load_variant(self, f: gitlab.FileDiff, ws: bool, full: bool):
+        """Whole file and/or whitespace ignored: GitLab's diff has 3 lines of context and no -w."""
+        key = (f.path, ws, full)
+        options = (["-U100000"] if full else []) + (["-w"] if ws else [])
+
+        def done(text, error):
+            if error:
+                if self.current == f.path:
+                    self.diff.set_message(f"Could not get the diff with git: {error}", f.path)
+                return
+            self.variants[key] = text
+            if self.current == f.path and (self.diff.ignore_ws, self.diff.full_file) == (ws, full):
+                self.show_file(f.path, keep=True)
+
+        mr, cred = self.mr, self._cred()
+        self.tasks.submit_api(lambda: self._git_diff(mr, cred, f, *options), done)
+
     def _load_local_diff(self, f: gitlab.FileDiff):
         mr, cred = self.mr, self._cred()
 
         def work():
-            repo = ai_review.cache_repo(mr.host, mr.project, cred)
-            try:
-                run_git(["cat-file", "-e", f"{mr.head_sha}^{{commit}}"], cwd=repo, timeout=15)
-            except GitError:
-                run_git(["fetch", "--no-tags", "origin", f"refs/merge-requests/{mr.iid}/head"], cwd=repo,
-                        cred=cred, timeout=300)
-            paths = [f.old_path, f.new_path] if f.renamed else [f.path]
-            return run_git(["diff", "--no-color", "--no-ext-diff", "-M", mr.base_sha, mr.head_sha, "--", *paths],
-                           cwd=repo, timeout=120)
+            return self._git_diff(mr, cred, f)
 
         def done(text, error):
             if error:
@@ -897,6 +934,8 @@ class ReviewWindow(QWidget):
         self.update_counts()
         self.sub.setText("Sending comments…")
         mr, client, by_path = self.mr, self.client, dict(self.by_path)
+        # Whole-file diffs already loaded: an unchanged line far from the changes still gets both its numbers.
+        whole = {path: text for (path, _ws, full), text in self.variants.items() if full}
 
         def work():
             sent, moved = [], 0
@@ -906,8 +945,9 @@ class ReviewWindow(QWidget):
                     line, side = c.get("line"), c.get("side")
                     new_line = old_line = None
                     if f is not None and line:
-                        ctx = next((l for l in parse_diff(f.diff).lines if l.kind == "ctx" and (
-                            (side == "new" and l.new == line) or (side == "old" and l.old == line))), None)
+                        ctx = next((l for text in (f.diff, whole.get(f.path, "")) for l in parse_diff(text).lines
+                                    if l.kind == "ctx" and ((side == "new" and l.new == line)
+                                                            or (side == "old" and l.old == line))), None)
                         if ctx is not None:  # GitLab needs both numbers on an unchanged line.
                             new_line, old_line = ctx.new, ctx.old
                         elif side == "new":
