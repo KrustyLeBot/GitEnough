@@ -110,7 +110,8 @@ class Handle:
 
 
 def run(prompt: str, model: str = "", *, cwd: str | None = None, tools: str = "", schema: dict | None = None,
-        system: str = "", timeout: int = 600, on_event=None, handle: Handle | None = None, skills: bool = False):
+        system: str = "", timeout: int = 600, on_event=None, handle: Handle | None = None, skills: bool = False,
+        on_text=None):
     """One headless Claude run; returns the structured output (schema) or the text result.
 
     --safe-mode by default: the user's plugins, hooks and personal CLAUDE.md must not change the answer (a
@@ -119,15 +120,19 @@ def run(prompt: str, model: str = "", *, cwd: str | None = None, tools: str = ""
     tools: comma-separated built-in tools Claude may use, "" for none.
     on_event: called with each stream-json event (progress), from this worker thread.
     handle: lets the caller cancel the run.
+    on_text: called with each piece of the answer as it is written (live preview), from this worker thread.
     """
     path = find_cli()
     if not path:
         raise AIError("Claude Code is not installed. Install it from https://claude.com/claude-code, "
                       "then sign in with `claude auth login`.")
+    stream = bool(on_event or on_text)
     args = [path, "-p", "--no-session-persistence", "--tools", tools, "--output-format",
-            "stream-json" if on_event else "json"]
-    if on_event:
+            "stream-json" if stream else "json"]
+    if stream:
         args.append("--verbose")  # stream-json requires it in print mode
+    if on_text:
+        args.append("--include-partial-messages")
     if model:
         args += ["--model", model]
     if skills:
@@ -142,9 +147,11 @@ def run(prompt: str, model: str = "", *, cwd: str | None = None, tools: str = ""
         args += ["--append-system-prompt", system]
     # stderr goes to a file: an unread pipe fills up and blocks the CLI while stdout streams.
     errors = tempfile.TemporaryFile()
+    # Telemetry, error reports and the update check cost ~2 s of startup per run, and none matter here.
+    env = {**os.environ, "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1"}
     try:
         proc = subprocess.Popen(args, cwd=cwd, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                                stderr=errors, creationflags=NO_WINDOW)
+                                stderr=errors, creationflags=NO_WINDOW, env=env)
     except OSError as exc:
         raise AIError(f"Could not start Claude Code: {exc}") from exc
     if handle is not None:
@@ -161,7 +168,7 @@ def run(prompt: str, model: str = "", *, cwd: str | None = None, tools: str = ""
             proc.stdin.close()
         except OSError:
             pass  # The CLI exited early (cancelled or failed): its answer or stderr says why.
-        if on_event:
+        if stream:
             for raw in proc.stdout:
                 try:
                     event = json.loads(raw.decode("utf-8", errors="replace"))
@@ -169,7 +176,12 @@ def run(prompt: str, model: str = "", *, cwd: str | None = None, tools: str = ""
                     continue
                 if event.get("type") == "result":
                     final = event
-                else:
+                    continue
+                if on_text and event.get("type") == "stream_event":
+                    delta = (event.get("event") or {}).get("delta") or {}
+                    if delta.get("type") == "text_delta" and delta.get("text"):
+                        on_text(delta["text"])
+                if on_event:
                     on_event(event)
             proc.wait(timeout=timeout)
         else:
@@ -231,7 +243,7 @@ Staged diff{cut}:
 """
 
 
-def commit_message(path: str, model: str = COMMIT_MODEL, handle: Handle | None = None) -> str:
+def commit_message(path: str, model: str = COMMIT_MODEL, handle: Handle | None = None, on_text=None) -> str:
     from .git_ops import run_git
 
     diff = run_git(["diff", "--cached", "--no-color", "--no-ext-diff", "-M", "--stat=200", "--patch"],
@@ -251,5 +263,5 @@ def commit_message(path: str, model: str = COMMIT_MODEL, handle: Handle | None =
     if len(diff) > MAX_COMMIT_DIFF:
         diff, cut = diff[:MAX_COMMIT_DIFF], f" (cut to the first {MAX_COMMIT_DIFF} characters)"
     prompt = COMMIT_PROMPT.format(branch=branch, recent=recent or "(none)", files=files, diff=diff, cut=cut)
-    text = run(prompt, model, cwd=path, timeout=180, handle=handle)
+    text = run(prompt, model, cwd=path, timeout=180, handle=handle, on_text=on_text)
     return text.strip().strip("`").strip()

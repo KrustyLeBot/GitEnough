@@ -2,7 +2,7 @@ import os
 import subprocess
 import time
 
-from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
@@ -17,7 +17,7 @@ from .ignore_dialog import IgnoreDialog
 from .never_commit_dialog import NeverCommitDialog
 from .repo import FileChange
 from .style import C
-from .widgets import ElidedLabel, ErrorDialog, ai_error_dialog, icon_button, keep_size
+from .widgets import ElidedLabel, ErrorDialog, Spinner, ai_error_dialog, icon_button, keep_size
 from .open_menu import OpenButton
 
 
@@ -114,6 +114,12 @@ class StashFilesDialog(QDialog):
         self.accept()
 
 
+class _AiBridge(QObject):
+    """Carries the commit message, piece by piece, from the Claude worker thread to the window."""
+
+    text = Signal(str)
+
+
 class ChangesWindow(QWidget):
     """Staged / unstaged files of one repository, with diff, stage, discard, ignore and commit."""
 
@@ -134,6 +140,7 @@ class ChangesWindow(QWidget):
         self.checked: set[str] = set()  # paths ticked for a stash, in either list
         self.busy = False
         self.last_refresh = 0.0
+        self.ai_before = None  # message typed before Claude started writing; None when Claude is not writing
         self.show_hidden = False  # never-commit lines shown in the list and the diffs
         self.kept = (0, 0, 0, 0)  # never_commit.summary
         self._rebuild = False
@@ -342,7 +349,8 @@ class ChangesWindow(QWidget):
         # The draft (typed or suggested by Claude) outlives the window: it comes back at the next opening.
         self.message.setPlainText(Config.load_draft(self.path))
         self.draft_timer = QTimer(self, singleShot=True, interval=600)
-        self.draft_timer.timeout.connect(lambda: Config.save_draft(self.path, self.message.toPlainText()))
+        self.draft_timer.timeout.connect(
+            lambda: self.ai_before is None and Config.save_draft(self.path, self.message.toPlainText()))
         self.message.textChanged.connect(self.draft_timer.start)
         lay.addWidget(self.message)
         buttons = QHBoxLayout()
@@ -352,6 +360,11 @@ class ChangesWindow(QWidget):
                                     "through your Claude Code sign-in)")
         self.suggest_btn.clicked.connect(self.suggest_message)
         self.suggest_btn.setVisible(ai.find_cli() is not None)
+        self.ai_spinner = Spinner(16)
+        self.ai_spinner.hide()
+        self.ai_bridge = _AiBridge(self)
+        self.ai_bridge.text.connect(self._on_ai_text)
+        buttons.addWidget(self.ai_spinner)
         buttons.addWidget(self.suggest_btn)
         self.commit_btn = QPushButton("Commit")
         self.commit_btn.setObjectName("primary")
@@ -765,13 +778,30 @@ class ChangesWindow(QWidget):
         self.changed.emit()
 
     def suggest_message(self):
+        if self.ai_before is not None:
+            self.ai_handle.cancel()  # the button reads "Stop" while Claude writes
+            return
         if self.busy or not self.staged:
             return
         model = self.main.config.ai_commit_model
-        self.suggest_btn.setEnabled(False)
-        self.status.setText(f"Asking Claude ({model or 'default model'}) for a commit message…")
+        self.status.setText(f"Claude ({model or 'default model'}) is reading the staged changes…")
         self.ai_handle = ai.Handle()
-        path = self.path
+        path, bridge = self.path, self.ai_bridge
+        # Claude's answer appears in the box as it is written; Ctrl+Z afterwards brings this text back.
+        self.ai_before = self.message.toPlainText()
+        self.message.setUndoRedoEnabled(False)
+        self.message.setReadOnly(True)
+        self.message.clear()
+        self.message.setPlaceholderText("Claude is reading the staged changes…")
+        self.ai_spinner.show()
+        self.suggest_btn.setText("■ Stop")
+        self.update_buttons()
+
+        def piece(text):
+            try:
+                bridge.text.emit(text)
+            except RuntimeError:
+                pass  # window closed: the final answer still goes to the draft
 
         def done(text, error):
             if text and not error:
@@ -781,14 +811,31 @@ class ChangesWindow(QWidget):
             except RuntimeError:
                 pass  # window closed before Claude answered: the draft waits for the next opening
 
-        self.tasks.submit_ai(ai.commit_message, done, path, model, self.ai_handle)
+        self.tasks.submit_ai(ai.commit_message, done, path, model, self.ai_handle, piece)
+
+    def _on_ai_text(self, text: str):
+        if self.ai_before is None:
+            return
+        if not self.message.toPlainText():
+            self.status.setText("Claude is writing the commit message…")
+        cursor = self.message.textCursor()
+        cursor.movePosition(cursor.MoveOperation.End)
+        cursor.insertText(text)
+        self.message.setTextCursor(cursor)
 
     def _on_suggestion(self, text, error):
-        self.suggest_btn.setEnabled(True)
+        before, self.ai_before = self.ai_before or "", None
+        self.ai_spinner.hide()
+        self.suggest_btn.setText("✨ Suggest")
+        self.message.setReadOnly(False)
+        self.message.setPlaceholderText("Commit message  (Ctrl+Enter to commit)")
+        self.message.setPlainText(before)  # undo is still off: this step is not recorded
+        self.message.setUndoRedoEnabled(True)
         self.update_buttons()
         if error:
             self.status.setText("")
-            ai_error_dialog(self, str(error))
+            if str(error) != "Cancelled":
+                ai_error_dialog(self, str(error))
             return
         used = ", ".join(getattr(self, "ai_handle", None) and self.ai_handle.models or []) or "Claude"
         self.status.setText(f"Suggested by {used}: edit it before committing if needed")
@@ -822,10 +869,11 @@ class ChangesWindow(QWidget):
     def update_buttons(self):
         if not hasattr(self, "commit_btn"):
             return  # the restored draft fires textChanged while the panel is still being built
-        ok = bool(self.staged) and bool(self.message.toPlainText().strip()) and not self.busy
+        ok = (bool(self.staged) and bool(self.message.toPlainText().strip()) and not self.busy
+              and self.ai_before is None)  # never commit a message Claude is still writing
         self.commit_btn.setEnabled(ok)
         if hasattr(self, "suggest_btn"):
-            self.suggest_btn.setEnabled(bool(self.staged) and not self.busy)
+            self.suggest_btn.setEnabled(self.ai_before is not None or (bool(self.staged) and not self.busy))
         self.commit_push_btn.setEnabled(ok)
         n = len(self.staged)
         self.commit_btn.setText(f"Commit {n} file{'s' if n != 1 else ''}" if n else "Commit")
@@ -883,6 +931,8 @@ class ChangesWindow(QWidget):
         if self.draft_timer.isActive():
             self.draft_timer.stop()
             Config.save_draft(self.path, self.message.toPlainText())
+        if self.ai_before is not None:
+            Config.save_draft(self.path, self.ai_before)  # Claude's answer replaces it when it arrives
         super().closeEvent(event)
 
     def changeEvent(self, event):
