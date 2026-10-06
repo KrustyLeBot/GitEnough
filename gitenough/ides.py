@@ -51,6 +51,9 @@ def devenv_path(choice: str = VS_LATEST) -> str | None:
 
 
 def open_solution(solution: str, choice: str = VS_LATEST) -> bool:
+    slnx = solution.lower().endswith(".slnx")
+    if slnx and choice == VS_SELECTOR:
+        choice = VS_LATEST  # the selector reads the version line of a .sln; a .slnx is XML without one
     try:
         if choice == VS_SELECTOR and os.path.isfile(VS_LAUNCHER):
             subprocess.Popen([VS_LAUNCHER, solution])  # picks the version the solution file asks for

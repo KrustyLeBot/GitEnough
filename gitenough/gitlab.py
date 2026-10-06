@@ -122,6 +122,7 @@ class FileDiff:
     deleted: bool = False
     renamed: bool = False
     too_large: bool = False  # GitLab sent no diff text (collapsed or over its limits)
+    blob: str = ""  # the file's blob at the merge request's head ("" when unknown or deleted)
 
     @property
     def path(self) -> str:
@@ -129,7 +130,20 @@ class FileDiff:
 
     @property
     def signature(self) -> str:
-        """Changes when the file's diff changes (new pushes): a viewed file becomes unviewed again."""
+        """Changes when the file changes (new pushes): a viewed file becomes unviewed again.
+
+        The blob at head when known: a rebase that leaves the file alone keeps it viewed, and a file too large
+        for GitLab's diff still changes. Otherwise the diff text (diff_signature).
+        """
+        if self.blob:
+            return "blob:" + self.blob
+        if self.deleted:
+            return "deleted"
+        return self.diff_signature
+
+    @property
+    def diff_signature(self) -> str:
+        """The signature of GitEnough 1.5.4 and before, still accepted for files viewed then."""
         return hashlib.sha1(self.diff.encode("utf-8", "replace")).hexdigest()[:16]
 
 
@@ -188,8 +202,8 @@ class Client:
         return cls(vault.host_of(key), token)
 
     def _request(self, method: str, path: str, params: dict | None = None, body: dict | None = None,
-                 timeout: int = 30):
-        url = self.base + path + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
+                 timeout: int = 30, url: str = ""):
+        url = (url or self.base + path) + ("?" + urllib.parse.urlencode(params, doseq=True) if params else "")
         data = json.dumps(body).encode("utf-8") if body is not None else None
         req = urllib.request.Request(url, data=data, method=method, headers={
             "PRIVATE-TOKEN": self.token, "User-Agent": USER_AGENT, "Content-Type": "application/json"})
@@ -359,6 +373,21 @@ class Client:
                 progress(len(out), int(headers.get("X-Total", 0) or 0))
             nxt = headers.get("X-Next-Page", "")
             page = int(nxt) if nxt.isdigit() else 0
+        return out
+
+    def blob_ids(self, project: str, ref: str, paths: list[str]) -> dict[str, str]:
+        """{path: blob id} of files at a commit, 100 paths per GraphQL request; missing paths are left out."""
+        query = ("query($project: ID!, $ref: String!, $paths: [String!]!) { project(fullPath: $project) "
+                 "{ repository { blobs(ref: $ref, paths: $paths) { nodes { path oid } } } } }")
+        graphql = self.base.rsplit("/v4", 1)[0] + "/graphql"
+        out = {}
+        for i in range(0, len(paths), 100):
+            data, _h = self._request("POST", "", url=graphql, timeout=60,
+                                     body={"query": query, "variables": {"project": project, "ref": ref,
+                                                                         "paths": paths[i:i + 100]}})
+            repo = (((data or {}).get("data") or {}).get("project") or {}).get("repository") or {}
+            out.update({n["path"]: n["oid"] for n in (repo.get("blobs") or {}).get("nodes") or []
+                        if n.get("path") and n.get("oid")})
         return out
 
     def discussions(self, project: str, iid: int) -> list[Discussion]:

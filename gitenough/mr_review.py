@@ -360,6 +360,12 @@ class ReviewWindow(QWidget):
             fresh = client.merge_request(mr.project, mr.iid)
             fresh.reasons = mr.reasons
             files = client.diffs(mr.project, mr.iid)
+            try:  # what "viewed" remembers of each file; without it, the diff text
+                blobs = client.blob_ids(mr.project, fresh.head_sha, [f.new_path for f in files if not f.deleted])
+            except GitError:
+                blobs = {}
+            for f in files:
+                f.blob = "" if f.deleted else blobs.get(f.new_path, "")
             discussions = client.discussions(mr.project, mr.iid)
             try:
                 drafts = client.draft_count(mr.project, mr.iid)
@@ -380,9 +386,10 @@ class ReviewWindow(QWidget):
         self.by_path = {f.path: f for f in self.files}
         self.parsed.clear()
         self.variants.clear()
-        # A file viewed before a push that changed it is unviewed again.
-        self.viewed = {p: sig for p, sig in self.viewed.items() if p in self.by_path
-                       and self.by_path[p].signature == sig}
+        # A file viewed before a push that changed it is unviewed again. Files viewed with GitEnough 1.5.4 or
+        # before carry the hash of their diff: still matched, then moved to the new signature.
+        self.viewed = {p: self.by_path[p].signature for p, sig in self.viewed.items() if p in self.by_path
+                       and sig in (self.by_path[p].signature, self.by_path[p].diff_signature)}
         self.checked.clear()
         self.checked.update(self.viewed)
         mr = self.mr
