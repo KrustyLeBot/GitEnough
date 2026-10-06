@@ -224,10 +224,12 @@ COMMIT_PROMPT = """Write a git commit message for the staged changes below.
 
 Rules:
 - First line: imperative summary, at most 72 characters, no trailing period.
-- Then, only if the change is not trivial: a blank line and a short body (wrapped at 72 characters)
-  saying what changed and why. Bullets are fine for several independent changes.
+- Keep it short. Most commits need the first line only. Add a body only when the reason for the change
+  is not obvious from the first line: a blank line, then at most 3 short lines (or 3 bullets for
+  independent changes), wrapped at 72 characters. Say why, not what: the diff already shows what changed.
+  Never list files, functions or every change one by one.
 - Match the language and conventions of the recent commit messages (prefixes like "feat:", ticket
-  keys, capitalisation), if they follow one.
+  keys, capitalisation), if they follow one, but not their length.
 - Output the commit message only: no code fences, no preamble.
 
 Branch: {branch}
