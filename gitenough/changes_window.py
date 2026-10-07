@@ -114,6 +114,9 @@ class StashFilesDialog(QDialog):
         self.accept()
 
 
+POLL_MS = 5000  # periodic refresh of an open Changes window
+
+
 class _AiBridge(QObject):
     """Carries the commit message, piece by piece, from the Claude worker thread to the window."""
 
@@ -176,7 +179,8 @@ class ChangesWindow(QWidget):
         hl.addWidget(compare)
         hl.addWidget(discard_all)
         hl.addSpacing(6)
-        refresh = icon_button("refresh", "Refresh (F5)")
+        refresh = QPushButton("⟳ Refresh")
+        refresh.setToolTip("Read the files and their diffs again (F5); also done every few seconds")
         refresh.clicked.connect(self.refresh)
         hl.addWidget(refresh)
         hl.addWidget(OpenButton(self.main, project))
@@ -211,6 +215,10 @@ class ChangesWindow(QWidget):
         QShortcut(QKeySequence("Ctrl+Return"), self, lambda: self.do_commit(False))
         self.search_timer = QTimer(self, singleShot=True, interval=300)
         self.search_timer.timeout.connect(self.start_content_search)
+        # Besides the file watcher (off in Settings, or blind to a network drive): a cheap git status.
+        self.poll_timer = QTimer(self, interval=POLL_MS)
+        self.poll_timer.timeout.connect(self._poll)
+        self.poll_timer.start()
         self.refresh()
 
     # ---------- layout ----------
@@ -412,6 +420,10 @@ class ChangesWindow(QWidget):
         return view
 
     # ---------- data ----------
+    def _poll(self):
+        if self.isVisible() and not self.isMinimized() and not self.busy and time.monotonic() - self.last_refresh > 2:
+            self.refresh()
+
     def refresh(self):
         self.last_refresh = time.monotonic()
         self.tasks.submit(_list, self._on_list, self.path, not self.show_hidden)
@@ -429,7 +441,12 @@ class ChangesWindow(QWidget):
             self.diff_cache.clear()
             self._update_kept()
         elif tuple(lists) == (self.staged, self.unstaged) and not self._rebuild:
-            return  # Nothing changed: leave lists, selection and diff alone.
+            # Same files, but the one on screen may have changed again: its diff is read anew, and only
+            # re-rendered when it differs (lists, selection and scroll stay).
+            self.diff_cache.clear()
+            if self.current is not None and not self.editing:
+                self.show_diff(self.current)
+            return
         self._rebuild = False
         self.staged, self.unstaged = lists
         # Files committed, discarded or stashed elsewhere drop out of the ticked set.
