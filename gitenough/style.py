@@ -108,8 +108,8 @@ QScrollBar:vertical {{ background: transparent; width: 10px; margin: 2px; }}
 QScrollBar::handle:vertical {{ background: #2c3240; border-radius: 4px; min-height: 30px; }}
 QScrollBar::handle:vertical:hover {{ background: #3a4150; }}
 QScrollBar::add-line, QScrollBar::sub-line, QScrollBar::add-page, QScrollBar::sub-page {{ height: 0; background: none; }}
-QScrollBar:horizontal {{ background: transparent; height: 10px; margin: 2px; }}
-QScrollBar::handle:horizontal {{ background: #2c3240; border-radius: 4px; min-width: 30px; }}
+QScrollBar:horizontal {{ background: transparent; height: 15px; margin: 2px; }}
+QScrollBar::handle:horizontal {{ background: #2c3240; border-radius: 5px; min-width: 48px; }}
 QScrollBar::handle:horizontal:hover {{ background: #3a4150; }}
 QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal,
 QScrollBar::add-page:horizontal, QScrollBar::sub-page:horizontal {{ width: 0; background: none; }}
