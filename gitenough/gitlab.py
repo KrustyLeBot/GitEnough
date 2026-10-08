@@ -408,12 +408,17 @@ class Client:
 
     def raw_file(self, project: str, path: str, ref: str) -> str | None:
         """A file's text at a commit, or None when it does not exist."""
+        data = self.raw_bytes(project, path, ref)
+        return None if data is None else data.decode("utf-8", "replace")
+
+    def raw_bytes(self, project: str, path: str, ref: str, timeout: int = 30) -> bytes | None:
+        """A file's content at a commit, or None when it does not exist."""
         quoted = urllib.parse.quote(path, safe="")
         try:
             url = f"{self.base}/projects/{self.pid(project)}/repository/files/{quoted}/raw?ref={ref}"
             req = urllib.request.Request(url, headers={"PRIVATE-TOKEN": self.token, "User-Agent": USER_AGENT})
-            with urllib.request.urlopen(req, timeout=30) as resp:
-                return resp.read().decode("utf-8", "replace")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return resp.read()
         except urllib.error.HTTPError as exc:
             if exc.code == 404:
                 return None

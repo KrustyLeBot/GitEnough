@@ -620,7 +620,8 @@ class ChangesWindow(QWidget):
         shown = (fc.key, *pair)
         if shown != self._image_shown:  # the periodic refresh repaints only a changed image
             self._image_shown = shown
-            self.images.show_pair(fc.path, pair[0], pair[1], fc.staged)
+            self.images.show_pair(fc.path, pair[0], pair[1], "last commit" if fc.staged else "staged",
+                                  "staged" if fc.staged else "working folder")
         self.center.setCurrentIndex(2)
 
     def _on_diff(self, fc: FileChange, key, data, error):

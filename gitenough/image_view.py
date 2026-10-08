@@ -139,10 +139,10 @@ class ImageDiffView(QWidget):
         sides.addWidget(self.after, 1)
         lay.addLayout(sides, 1)
 
-    def show_pair(self, path: str, before: bytes | None, after: bytes | None, staged: bool):
+    def show_pair(self, path: str, before: bytes | None, after: bytes | None, before_label: str, after_label: str):
         self.title.setText(path)
-        self.before.caption.setText("Before · last commit" if staged else "Before · staged")
-        self.after.caption.setText("After · staged" if staged else "After · working folder")
+        self.before.caption.setText(f"Before · {before_label}")
+        self.after.caption.setText(f"After · {after_label}")
         self.before.setVisible(before is not None)
         self.after.setVisible(after is not None)
         self.before.show_data(before)

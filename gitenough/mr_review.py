@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QLineE
 
 from . import ai, ai_review, gitlab, review_skill, vault
 from .diff_view import DiffView, parse_diff
+from .image_view import ImageDiffView, is_image
 from .file_view import ExtensionBar, FileView, extension
 from .pipeline_view import PipelinePage, chip_style
 from .git_ops import Credential, GitError, run_git
@@ -194,6 +195,9 @@ class ReviewWindow(QWidget):
         self.center.addWidget(self._overview_page())
         self.pipeline_page = PipelinePage(self.tasks)
         self.center.addWidget(self.pipeline_page)
+        self.images = ImageDiffView()  # page 3: an image, before and after
+        self.center.addWidget(self.images)
+        self.image_cache: dict[str, tuple] = {}  # path -> (before, after) bytes
         split.addWidget(self.center)
         split.setStretchFactor(1, 1)
         split.setSizes([360, 1240])
@@ -386,6 +390,7 @@ class ReviewWindow(QWidget):
         self.by_path = {f.path: f for f in self.files}
         self.parsed.clear()
         self.variants.clear()
+        self.image_cache.clear()
         # A file viewed before a push that changed it is unviewed again. Files viewed with GitEnough 1.5.4 or
         # before carry the hash of their diff: still matched, then moved to the new signature.
         self.viewed = {p: self.by_path[p].signature for p, sig in self.viewed.items() if p in self.by_path
@@ -534,9 +539,13 @@ class ReviewWindow(QWidget):
         f = self.by_path.get(path)
         if f is None:
             return
-        self.center.setCurrentIndex(0)
         if not self.view.current_file() or self.view.current_file().path != path:
             self.view.select_path(path)
+        if is_image(path):
+            self._show_image(f)
+            self.update_counts()
+            return
+        self.center.setCurrentIndex(0)
         self.diff.set_inline(self._thread_widgets(path), render=False)
         ws, full = self.diff.ignore_ws, self.diff.full_file
         if f.too_large and not f.diff:
@@ -560,6 +569,34 @@ class ReviewWindow(QWidget):
             self.diff.set_diff(path, data, keep_scroll=keep)
         self._markers()
         self.update_counts()
+
+    def _show_image(self, f: gitlab.FileDiff):
+        """An image: the picture at the base and at the head, from GitLab, instead of a binary diff."""
+        cached = self.image_cache.get(f.path)
+        if cached is not None:
+            self.images.show_pair(f.path, cached[0], cached[1], f"target ({self.mr.target_branch})",
+                                  f"this merge request ({self.mr.source_branch})")
+            self.center.setCurrentIndex(3)
+            return
+        self.center.setCurrentIndex(0)
+        self.diff.set_message("Loading the image…", f.path)
+        mr, client = self.mr, self.client
+
+        def work():
+            before = None if f.new_file else client.raw_bytes(mr.project, f.old_path or f.path, mr.base_sha, 120)
+            after = None if f.deleted else client.raw_bytes(mr.project, f.new_path or f.path, mr.head_sha, 120)
+            return before, after
+
+        def done(pair, error):
+            if error:
+                if self.current == f.path:
+                    self.diff.set_message(f"Could not load the image: {error}", f.path)
+                return
+            self.image_cache[f.path] = pair
+            if self.current == f.path:
+                self._show_image(f)
+
+        self.tasks.submit_api(work, done)
 
     @staticmethod
     def _git_diff(mr, cred, f: gitlab.FileDiff, *options: str) -> str:
