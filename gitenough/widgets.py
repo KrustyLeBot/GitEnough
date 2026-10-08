@@ -412,7 +412,7 @@ class _SizeKeeper(QObject):
             self.owner.installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        if obj is self.owner and event.type() == QEvent.WindowStateChange:
+        if obj is self.owner and event.type() == QEvent.WindowStateChange and self._frame() is None:
             # Qt on Windows un-maximizes owned windows when their owner comes back from the taskbar.
             if obj.isMinimized():
                 self.max_before_minimize = self.win.isMaximized()
@@ -429,6 +429,10 @@ class _SizeKeeper(QObject):
                 self.save()
         return False
 
+    def _frame(self):
+        from .frame import frame_of
+        return frame_of(self.win)
+
     def _remaximize(self):
         if self.win.isVisible() and not self.win.isMaximized():
             self.win.showMaximized()
@@ -437,9 +441,13 @@ class _SizeKeeper(QObject):
         win = self.win
         if win.isMinimized() or win.isFullScreen():
             return
-        maximized = win.isMaximized()
+        frame = self._frame()
+        maximized = frame.maximized if frame is not None else win.isMaximized()
         # Maximized: keep the size it goes back to, not the screen size.
-        size = win.normalGeometry().size() if maximized else win.size()
+        if frame is not None:
+            size = frame.normal.size() if maximized else win.size()
+        else:
+            size = win.normalGeometry().size() if maximized else win.size()
         old = self.config.window_sizes.get(self.kind)
         if maximized and (not size.isValid() or size.isEmpty()):
             size = QSize(old[0], old[1]) if old else win.size()
@@ -456,7 +464,13 @@ def keep_size(win, config, kind: str, persist: bool = True) -> None:
     Call after the default resize() and before show(). persist=False only records the size in memory,
     for windows editing a config whose unsaved changes must not reach the disk.
     """
+    from .frame import adopt  # imported here: frame.py imports this module
+
     entry = config.window_sizes.get(kind)
+    maximized = bool(entry and len(entry) > 2 and entry[2])
+    framed = None
+    if win.isWindow() and not isinstance(win, QDialog):
+        framed = adopt(win, kind, maximized)  # maximizes inside the main window once shown
     if entry and len(entry) >= 2:
         screen = QGuiApplication.primaryScreen()
         area = screen.availableGeometry() if screen else None
@@ -464,7 +478,7 @@ def keep_size(win, config, kind: str, persist: bool = True) -> None:
         if area is not None:  # A smaller screen than last time: never open larger than it.
             w, h = min(w, area.width()), min(h, area.height())
         win.resize(max(w, 300), max(h, 200))
-        if len(entry) > 2 and entry[2]:
+        if maximized and framed is None:
             win.setWindowState(win.windowState() | Qt.WindowMaximized)
     _SizeKeeper(win, config, kind, persist)
 

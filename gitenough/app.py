@@ -32,6 +32,7 @@ from .style import QSS, C, app_icon, arrow_pixmap, check_pixmap, chevron_pixmap,
 from .tasks import Tasks
 from .update_toast import UpdateToast
 from .watcher import RepoWatcher
+from .frame import WindowDock
 from .open_menu import OpenButton
 from .widgets import ErrorDialog, NoWheelComboBox, confirm_discard_all, icon, icon_button, set_css
 
@@ -586,6 +587,8 @@ class MainWindow(QMainWindow):
         el.addStretch()
         self.stack.addWidget(empty)
         root.addWidget(self.stack, 1)
+        self.dock = WindowDock()  # the secondary windows, minimized ones highlighted (see frame.py)
+        root.addWidget(self.dock)
         self.statusBar().setSizeGripEnabled(False)
         self.statusBar().setContentsMargins(20, 0, 20, 4)
         self.statusBar().showMessage(f"v{__version__}")
