@@ -173,6 +173,9 @@ class Frame(QObject):
             return
         self.minimized = True
         self.win.hide()
+        dock = self.main.dock
+        if dock.front is self:
+            dock.front = None
         self.changed.emit()
 
     def bring_back(self):
@@ -228,6 +231,10 @@ class Frame(QObject):
                 elif kind == QEvent.Resize:
                     self.win.setGeometry(self.area())
             return False
+        if kind == QEvent.WindowActivate:
+            dock = getattr(self.main, "dock", None)
+            if dock is not None:
+                dock.front = self
         if kind == QEvent.Show:
             if self.bar is None:
                 self._install_bar()
@@ -307,8 +314,9 @@ class _Chip(QPushButton):
 
     def _click(self):
         f = self.frame
-        # Clicking the chip activates the main window first: on screen means "minimize it", like a taskbar.
-        if f.minimized or not f.win.isVisible():
+        # Like a taskbar. Clicking the chip activates the main window first, so "in front" is the last framed
+        # window activated, which the dock remembers.
+        if f.minimized or not f.win.isVisible() or self.dock.front is not f:
             f.bring_back()
         else:
             f.minimize()
@@ -326,6 +334,7 @@ class WindowDock(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.chips: dict[Frame, _Chip] = {}
+        self.front: Frame | None = None  # the framed window activated last
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 2, 0, 0)
         lay.setSpacing(6)
@@ -347,6 +356,8 @@ class WindowDock(QWidget):
         self.setVisible(True)
 
     def _remove(self, frame: Frame):
+        if self.front is frame:
+            self.front = None
         chip = self.chips.pop(frame, None)
         try:
             if chip is not None:
