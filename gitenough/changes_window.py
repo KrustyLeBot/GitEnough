@@ -14,6 +14,7 @@ from .errors import explain
 from .file_editor import FileEditor
 from .file_view import ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
+from .image_view import ImageDiffView, is_image, load_pair
 from .never_commit_dialog import NeverCommitDialog
 from .repo import FileChange
 from .style import C
@@ -204,6 +205,9 @@ class ChangesWindow(QWidget):
         self.center = QStackedWidget()
         self.center.addWidget(self.diff)
         self.center.addWidget(self.editor)
+        self.images = ImageDiffView()  # page 2: images, before and after
+        self.center.addWidget(self.images)
+        self._image_shown = None  # (file key, before, after) on the image page
         split.addWidget(self.center)
         split.setStretchFactor(1, 1)
         split.setSizes([420, 1020])
@@ -488,6 +492,8 @@ class ChangesWindow(QWidget):
             self.show_diff(self.current)
         else:
             self.current = None
+            if self.center.currentIndex() == 2:
+                self.center.setCurrentIndex(0)  # no image selected any more
             if not (self.unstaged_view.select_first() or self.staged_view.select_first()):
                 self.diff.set_message("No changes: working tree clean" if not all_files
                                       else "No file matches the filters")
@@ -547,7 +553,8 @@ class ChangesWindow(QWidget):
         return self.center.currentIndex() == 1
 
     def _editable(self, fc: FileChange | None) -> bool:
-        return fc is not None and fc.code != "U" and os.path.isfile(os.path.join(self.path, fc.path))
+        return (fc is not None and fc.code != "U" and not is_image(fc.path)
+                and os.path.isfile(os.path.join(self.path, fc.path)))
 
     def edit_current(self):
         fc = self.current
@@ -586,6 +593,11 @@ class ChangesWindow(QWidget):
             v.blockSignals(False)
 
     def show_diff(self, fc: FileChange):
+        if is_image(fc.path):
+            self.tasks.submit(load_pair, lambda pair, err: self._on_images(fc, pair, err), self.path, fc)
+            return
+        if self.center.currentIndex() == 2:
+            self.center.setCurrentIndex(0)
         ws, full = self.diff.ignore_ws, self.diff.full_file
         key = (*fc.key, ws, full)
         if key in self.diff_cache:
@@ -596,6 +608,20 @@ class ChangesWindow(QWidget):
             self.diff.set_message("Loading…", fc.path)
         self.tasks.submit(_load_diff, lambda data, err: self._on_diff(fc, key, data, err), self.path, fc, ws, full,
                           not self.show_hidden)
+
+    def _on_images(self, fc: FileChange, pair, error):
+        if not (self.current and self.current.key == fc.key) or self.editing:
+            return
+        if error:
+            self.center.setCurrentIndex(0)
+            self.diff.set_message(str(error), fc.path)
+            return
+        self.edit_btn.setEnabled(False)
+        shown = (fc.key, *pair)
+        if shown != self._image_shown:  # the periodic refresh repaints only a changed image
+            self._image_shown = shown
+            self.images.show_pair(fc.path, pair[0], pair[1], fc.staged)
+        self.center.setCurrentIndex(2)
 
     def _on_diff(self, fc: FileChange, key, data, error):
         if error:
