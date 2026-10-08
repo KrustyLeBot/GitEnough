@@ -8,7 +8,7 @@ the dock at the bottom of the main window, labelled with its repository.
 """
 
 from PySide6.QtCore import QEvent, QObject, QPoint, QRect, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter
+from PySide6.QtGui import QColor, QGuiApplication, QPainter
 from PySide6.QtWidgets import QBoxLayout, QHBoxLayout, QLabel, QPushButton, QSizePolicy, QToolButton, QWidget
 
 from .style import C
@@ -106,6 +106,7 @@ class Frame(QObject):
         super().__init__(win)
         self.win, self.main, self.kind = win, main, kind
         self.maximized = False
+        self.screen_max = None  # the other screen it fills, when maximized away from the main window
         self.minimized = False
         self.normal = QRect()  # geometry to go back to after an in-app maximize
         self.bar: TitleBar | None = None
@@ -134,7 +135,10 @@ class Frame(QObject):
         self.changed.emit()
 
     def area(self) -> QRect:
-        """Where a maximized window goes: the main window's inside, above the dock."""
+        """Where a maximized window goes: the main window's inside, above the dock, or the whole screen when the
+        window was maximized on another screen than the main window's."""
+        if self.screen_max is not None:
+            return self.screen_max.availableGeometry()
         rect = self.main.geometry()  # client area, without the main window's title bar
         dock = getattr(self.main, "dock", None)
         if dock is not None and dock.isVisible():
@@ -144,6 +148,8 @@ class Frame(QObject):
     def maximize(self):
         if not self.maximized:
             self.normal = self.win.geometry()
+            screen = QGuiApplication.screenAt(self.win.geometry().center()) or self.win.screen()
+            self.screen_max = screen if screen is not None and screen != self.main.screen() else None
         self.maximized = True
         self.win.setGeometry(self.area())
         if self.bar is not None:
@@ -211,8 +217,16 @@ class Frame(QObject):
     def eventFilter(self, obj, event):
         kind = event.type()
         if obj is self.main:
-            if kind in (QEvent.Move, QEvent.Resize) and self.maximized and self.win.isVisible():
-                QTimer.singleShot(0, lambda: self.maximized and self.win.setGeometry(self.area()))
+            if self.maximized and self.screen_max is None and self.win.isVisible():
+                # Right away, in the event: deferring it made the window trail behind a fast drag.
+                if kind == QEvent.Move:
+                    area = self.area()
+                    if area.size() == self.win.size():
+                        self.win.move(area.topLeft())  # a plain move: no relayout of the window's content
+                    else:
+                        self.win.setGeometry(area)
+                elif kind == QEvent.Resize:
+                    self.win.setGeometry(self.area())
             return False
         if kind == QEvent.Show:
             if self.bar is None:
@@ -282,7 +296,7 @@ class _Chip(QPushButton):
         f = self.frame
         self.setText(("▸  " if f.minimized else "") + f.title)
         self.setToolTip("Minimized: click to bring it back (middle click closes it)" if f.minimized
-                        else "Click to bring it to the front, again to minimize it (middle click closes it)")
+                        else "Click to minimize it (middle click closes it)")
         self.setStyleSheet(f"""
             QPushButton {{ text-align: left; padding: 7px 16px 7px 12px; border-radius: 8px; font-size: 10pt;
                            border: 1px solid {f.color if f.minimized else C['border']};
@@ -293,12 +307,11 @@ class _Chip(QPushButton):
 
     def _click(self):
         f = self.frame
-        if f.minimized:
+        # Clicking the chip activates the main window first: on screen means "minimize it", like a taskbar.
+        if f.minimized or not f.win.isVisible():
             f.bring_back()
-        elif f.win.isActiveWindow():
-            f.minimize()
         else:
-            f.bring_back()
+            f.minimize()
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MiddleButton:
@@ -335,9 +348,12 @@ class WindowDock(QWidget):
 
     def _remove(self, frame: Frame):
         chip = self.chips.pop(frame, None)
-        if chip is not None:
-            chip.deleteLater()
-        self.setVisible(bool(self.chips))
+        try:
+            if chip is not None:
+                chip.deleteLater()
+            self.setVisible(bool(self.chips))
+        except RuntimeError:
+            pass  # the app is closing: the dock went first
 
     def paintEvent(self, event):
         p = QPainter(self)
