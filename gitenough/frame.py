@@ -240,7 +240,13 @@ class Frame(QObject):
                 self._install_bar()
             if self.minimized:  # shown again from elsewhere (its button in the main list)
                 self.minimized = False
-                self.changed.emit()
+            self.changed.emit()  # its chip comes back if it was closed
+        elif kind == QEvent.Hide and not self.minimized:
+            # Closed. Some windows are only hidden then (merge requests keep running work): no chip any more.
+            dock = getattr(self.main, "dock", None)
+            if dock is not None and dock.front is self:
+                dock.front = None
+            self.changed.emit()
         elif kind == QEvent.WindowStateChange and self.win.isMaximized():
             # Aero snap to the top of the screen or Win+Up: maximize inside the app instead.
             QTimer.singleShot(0, self._unsnap)
@@ -301,6 +307,9 @@ class _Chip(QPushButton):
 
     def refresh(self):
         f = self.frame
+        if self.parentWidget() is not None:  # never on a parentless chip: it would open as its own window
+            self.setVisible(f.minimized or f.win.isVisible())
+            self.dock.sync()
         self.setText(("▸  " if f.minimized else "") + f.title)
         self.setToolTip("Minimized: click to bring it back (middle click closes it)" if f.minimized
                         else "Click to minimize it (middle click closes it)")
@@ -351,9 +360,9 @@ class WindowDock(QWidget):
         chip = _Chip(frame, self)
         self.chips[frame] = chip
         self.row.addWidget(chip)
+        chip.refresh()
         frame.changed.connect(chip.refresh)
         frame.win.destroyed.connect(lambda *_: self._remove(frame))
-        self.setVisible(True)
 
     def _remove(self, frame: Frame):
         if self.front is frame:
@@ -362,9 +371,13 @@ class WindowDock(QWidget):
         try:
             if chip is not None:
                 chip.deleteLater()
-            self.setVisible(bool(self.chips))
+            self.sync()
         except RuntimeError:
             pass  # the app is closing: the dock went first
+
+    def sync(self):
+        """Shown while a window is open or minimized; a closed window keeps no chip."""
+        self.setVisible(any(f.minimized or f.win.isVisible() for f in self.chips))
 
     def paintEvent(self, event):
         p = QPainter(self)
