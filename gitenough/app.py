@@ -225,6 +225,11 @@ class Row:
         self.base_flag.clicked.connect(self.on_base_flag)
         self.changes = QPushButton()
         self.changes.clicked.connect(lambda: win.open_changes(p))
+        # Never-commit changes leave "changes": this pill is the way to see and edit them.
+        self.kept = QPushButton()
+        self.kept.setCursor(Qt.PointingHandCursor)
+        self.kept.setStyleSheet(pill_css(C["orange"]) + "border: none; padding: 3px 9px;")
+        self.kept.clicked.connect(lambda: win.open_changes(p, show_kept=True))
         self.stash = QPushButton()
         self.stash.setCursor(Qt.PointingHandCursor)
         self.stash.setStyleSheet(pill_css(C["violet"]) + "border: none; padding: 3px 9px;")
@@ -250,13 +255,13 @@ class Row:
         self.compare.clicked.connect(lambda: win.open_compare(p))
         self.cells = [cell(self.pin, self.check, spacing=2), cell(info), cell(self.pill),
                       cell(self.branch, self.manage, self.compare, self.base_flag, spacing=3),
-                      cell(self.changes, self.stash, spacing=6),
+                      cell(self.changes, self.kept, self.stash, spacing=6),
                       cell(self.action, self.tree, self.open, self.gear, spacing=1)]
         self.cells[1].layout().setStretch(0, 1)
         # Rows are disabled while busy; a disabled focused widget hands focus to the next one in the
         # table, and the table then scrolls to it (back to the top). Mouse-only widgets avoid that.
         for widget in (self.pin, self.compare, self.base_flag, self.check, self.pill, self.branch, self.manage, self.changes,
-                       self.stash, self.action,
+                       self.kept, self.stash, self.action,
                        self.tree, self.open, self.gear):
             widget.setFocusPolicy(Qt.NoFocus)
 
@@ -408,6 +413,10 @@ class Row:
         self.open.setVisible(self.open.available())
         self.tree.setVisible(is_repo)
         self.manage.setVisible(is_repo)
+        kept = p.snap.kept if is_repo else 0
+        self.kept.setVisible(bool(kept))
+        self.kept.setText(f"🔒 {kept} never-commit")
+        self.kept.setToolTip("Changes kept out of every commit\nClick to see their diff and edit them")
         n = p.snap.stashes if is_repo else 0
         self.stash.setVisible(bool(n))
         self.stash.setText(f"{n} stashed")
@@ -1090,13 +1099,15 @@ class MainWindow(QMainWindow):
 
         self.tasks.submit(fn, done, p.path)
 
-    def open_changes(self, p: Project):
+    def open_changes(self, p: Project, show_kept: bool = False):
         if p.snap and p.snap.kind == "repo":
             def make():
                 w = ChangesWindow(self, p)
                 w.changed.connect(lambda: self.refresh_project(p))
                 return w
-            self._open_window("changes", p, make)
+            win = self._open_window("changes", p, make)
+            if show_kept:
+                win.kept_show.setChecked(True)  # the never-commit changes listed, with their diff
 
     def open_tree(self, p: Project):
         if p.snap and p.snap.kind == "repo":

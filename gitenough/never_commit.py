@@ -464,8 +464,17 @@ def hidden_filter(path: str, candidates: list[tuple[str, str]]) -> set[str]:
     return hidden(path, candidates) if has_entries(path) else set()
 
 
+def kept_count(path: str) -> int:
+    """Never-commit changes still hidden: lines found in their files, and whole new files."""
+    if not has_entries(path):
+        return 0
+    found, _files, _lost, whole = summary(path)
+    return found + whole
+
+
 git_ops.WORKTREE_GUARD = guard
 git_ops.HIDDEN_FILTER = hidden_filter
+git_ops.KEPT_COUNT = kept_count
 
 
 # ---------- marking lines ----------

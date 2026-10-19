@@ -430,7 +430,10 @@ class ChangesWindow(QWidget):
 
     def refresh(self):
         self.last_refresh = time.monotonic()
-        self.tasks.submit(_list, self._on_list, self.path, not self.show_hidden)
+        shown = self.show_hidden
+        # A list read before "Show them" changed must not overwrite the one read after.
+        self.tasks.submit(_list, lambda result, error: shown == self.show_hidden and self._on_list(result, error),
+                          self.path, not shown)
         branch = self.p.status.branch if self.p.status else None
         self.branch.setText(f"⎇  {branch}" if branch else "detached HEAD")
 

@@ -52,6 +52,7 @@ class Snapshot:
     op_detail: str = ""  # e.g. "3/7" for a rebase
     op_branch: str = ""  # branch being rebased
     stashes: int = 0
+    kept: int = 0  # never-commit changes (lines and whole files), hidden from `changes`
     solutions: list = field(default_factory=list)  # .sln / .slnx paths relative to the repo
     base_ref: str = ""  # what the branch is compared with: origin/<base>, else <base>
     base_behind: int = 0  # commits of base_ref missing from the current branch (a rebase would bring them)
@@ -147,6 +148,7 @@ def run_git(args: list[str], cwd: str | None = None, cred: Credential | None = N
 # and files whose only change is such lines drop out of the status.
 WORKTREE_GUARD = None  # (cwd, args) -> context manager | None
 HIDDEN_FILTER = None  # (path, [(file, index blob)]) -> set of files
+KEPT_COUNT = None  # path -> number of never-commit changes
 
 
 def run_git_bytes(args: list[str], cwd: str | None = None, cred: Credential | None = None,
@@ -464,6 +466,7 @@ def inspect(url: str, path: str, cred: Credential | None, fetch: bool) -> Snapsh
         snap.on_origin = on_origin
         snap.op, snap.op_detail, snap.op_branch = in_progress(path)
         snap.stashes = stash_count(path)
+        snap.kept = KEPT_COUNT(path) if KEPT_COUNT else 0
         snap.solutions = find_solutions(path)
         snap.base = BASE_OVERRIDES.get(os.path.normcase(os.path.normpath(path))) or base_branch(path, branches)
         if snap.base in branches:
