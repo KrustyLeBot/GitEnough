@@ -39,6 +39,12 @@ from .widgets import ErrorDialog, NoWheelComboBox, confirm_discard_all, icon, ic
 FOCUS_REFRESH_DELAY = 4.0
 
 
+def changes_count(p) -> int:
+    """Local changes of a repository, never-commit ones included: they are changes, only kept out of commits."""
+    st, snap = p.status, p.snap
+    return (st.changes if st else 0) + (snap.kept if snap is not None and snap.kind == "repo" else 0)
+
+
 @dataclass
 class Project:
     url: str  # configured URL, or the repository's own origin for folders found on disk
@@ -83,7 +89,7 @@ def matches(p: Project, key: str) -> bool:
     if key == "missing":
         return p.missing
     if key == "changes":
-        return bool(st and st.changes)
+        return bool(changes_count(p))
     if key == "behind":
         return bool(st and st.behind and not p.mismatch)
     if key == "offbase":
@@ -224,12 +230,9 @@ class Row:
         self.base_flag = QPushButton()
         self.base_flag.clicked.connect(self.on_base_flag)
         self.changes = QPushButton()
-        self.changes.clicked.connect(lambda: win.open_changes(p))
-        # Never-commit changes leave "changes": this pill is the way to see and edit them.
-        self.kept = QPushButton()
-        self.kept.setCursor(Qt.PointingHandCursor)
-        self.kept.setStyleSheet(pill_css(C["orange"]) + "border: none; padding: 3px 9px;")
-        self.kept.clicked.connect(lambda: win.open_changes(p, show_kept=True))
+        # Only never-commit changes: the window opens with them shown, or it would look empty.
+        self.changes.clicked.connect(lambda: win.open_changes(
+            p, show_kept=bool(p.status and not p.status.changes and p.snap and p.snap.kept)))
         self.stash = QPushButton()
         self.stash.setCursor(Qt.PointingHandCursor)
         self.stash.setStyleSheet(pill_css(C["violet"]) + "border: none; padding: 3px 9px;")
@@ -255,13 +258,13 @@ class Row:
         self.compare.clicked.connect(lambda: win.open_compare(p))
         self.cells = [cell(self.pin, self.check, spacing=2), cell(info), cell(self.pill),
                       cell(self.branch, self.manage, self.compare, self.base_flag, spacing=3),
-                      cell(self.changes, self.kept, self.stash, spacing=6),
+                      cell(self.changes, self.stash, spacing=6),
                       cell(self.action, self.tree, self.open, self.gear, spacing=1)]
         self.cells[1].layout().setStretch(0, 1)
         # Rows are disabled while busy; a disabled focused widget hands focus to the next one in the
         # table, and the table then scrolls to it (back to the top). Mouse-only widgets avoid that.
         for widget in (self.pin, self.compare, self.base_flag, self.check, self.pill, self.branch, self.manage, self.changes,
-                       self.kept, self.stash, self.action,
+                       self.stash, self.action,
                        self.tree, self.open, self.gear):
             widget.setFocusPolicy(Qt.NoFocus)
 
@@ -378,17 +381,20 @@ class Row:
             set_css(self.changes, f"{base} background: transparent; color: {C["faint"]}; padding: 3px 0; font-weight: 400;")
             self.changes.setToolTip("")
             self.changes.setCursor(Qt.ArrowCursor)
-        elif st.changes:
-            self.changes.setText(f"✎  {st.changes} change{'s' if st.changes > 1 else ''}")
+        elif changes_count(p):
+            total, kept = changes_count(p), p.snap.kept
+            self.changes.setText(f"✎  {total} change{'s' if total > 1 else ''}")
             set_css(self.changes, pill_css(C["yellow"]) + base)
-            self.changes.setToolTip("Modified, added or untracked files\nClick to review, stage and commit")
+            self.changes.setToolTip("Modified, added or untracked files"
+                                    + (f" ({kept} never committed)" if kept else "")
+                                    + "\nClick to review, stage and commit")
             self.changes.setCursor(Qt.PointingHandCursor)
         else:
             self.changes.setText("Clean")
             set_css(self.changes, f"{base} background: transparent; color: {C["muted"]}; padding: 3px 0; font-weight: 400;")
             self.changes.setToolTip("No local changes")
             self.changes.setCursor(Qt.ArrowCursor)
-        self.changes.setEnabled(bool(st and st.changes))
+        self.changes.setEnabled(bool(changes_count(p)))
 
         text, tooltip = {
             "fix": ("Fix remote", "Replace the origin URL with the configured URL, then fetch"),
@@ -413,10 +419,6 @@ class Row:
         self.open.setVisible(self.open.available())
         self.tree.setVisible(is_repo)
         self.manage.setVisible(is_repo)
-        kept = p.snap.kept if is_repo else 0
-        self.kept.setVisible(bool(kept))
-        self.kept.setText(f"🔒 {kept} never-commit")
-        self.kept.setToolTip("Changes kept out of every commit\nClick to see their diff and edit them")
         n = p.snap.stashes if is_repo else 0
         self.stash.setVisible(bool(n))
         self.stash.setText(f"{n} stashed")
