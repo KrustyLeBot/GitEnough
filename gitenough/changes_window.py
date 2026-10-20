@@ -4,15 +4,15 @@ import time
 
 from PySide6.QtCore import QEvent, QObject, Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QLabel, QLineEdit, QMenu, QMessageBox,
+from PySide6.QtWidgets import (QCheckBox, QDialog, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMenu, QMessageBox,
                                QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QVBoxLayout, QWidget)
 
-from . import ai, never_commit, rebase, repo
+from . import ai, changelists, never_commit, rebase, repo
 from .config import Config
 from .diff_view import DiffView, parse_diff
 from .errors import explain
 from .file_editor import FileEditor
-from .file_view import ExtensionBar, FileView, extension
+from .file_view import GROUP, ExtensionBar, FileView, extension
 from .ignore_dialog import IgnoreDialog
 from .image_view import ImageDiffView, is_image, load_pair
 from .never_commit_dialog import NeverCommitDialog
@@ -282,6 +282,7 @@ class ChangesWindow(QWidget):
 
         self.staged_view = self._make_view()
         self.unstaged_view = self._make_view()
+        self.unstaged_view.group_action = "Stage"
 
         row = QHBoxLayout()
         self.search = QLineEdit()
@@ -322,7 +323,11 @@ class ChangesWindow(QWidget):
         stage_all.clicked.connect(lambda: self.stage(self.unstaged))
         discard = icon_button("discard", "Discard changes in selected files (Del)")
         discard.clicked.connect(lambda: self.discard(self.unstaged_view.selected_files()))
-        for b in (stage_sel, stage_all):
+        new_list = QPushButton("+ Changelist")
+        new_list.setToolTip("Group unstaged files to commit them separately: drag files onto a changelist, "
+                            "or right-click them > Move to changelist")
+        new_list.clicked.connect(lambda: self.new_changelist(self.unstaged_view.selected_files()))
+        for b in (new_list, stage_sel, stage_all):
             b.setObjectName("rowAction")
             unstaged_head.addWidget(b)
         unstaged_head.addWidget(discard)
@@ -332,7 +337,7 @@ class ChangesWindow(QWidget):
         lay.addWidget(self.unstaged_ext)
         lay.addWidget(self.unstaged_view, 3)
 
-        hint = QLabel("Double-click or Space to stage / unstage · right-click to ignore · tick to stash")
+        hint = QLabel("Double-click or Space to stage / unstage · drag onto a changelist · tick to stash")
         hint.setObjectName("muted")
         lay.addWidget(hint)
 
@@ -421,6 +426,7 @@ class ChangesWindow(QWidget):
         view.delete_pressed.connect(lambda files, v=view: v is self.unstaged_view and self.discard(files))
         view.setContextMenuPolicy(Qt.CustomContextMenu)
         view.customContextMenuRequested.connect(lambda pos, v=view: self.context_menu(v, pos))
+        view.dropped.connect(self.on_dropped)
         return view
 
     # ---------- data ----------
@@ -456,6 +462,9 @@ class ChangesWindow(QWidget):
             return
         self._rebuild = False
         self.staged, self.unstaged = lists
+        hidden = set() if self.show_hidden else {e["file"] for e in never_commit.entries(self.path)} | \
+            set(never_commit.kept_files(self.path))
+        changelists.prune(self.path, {f.path for f in self.unstaged}, hidden)
         # Files committed, discarded or stashed elsewhere drop out of the ticked set.
         self.checked.intersection_update({f.path for f in self.staged + self.unstaged})
         self.diff_cache.clear()
@@ -480,10 +489,16 @@ class ChangesWindow(QWidget):
 
     def populate(self):
         keep = self.current.key if self.current else None
+        names, members = changelists.load(self.path)
         for view, files in ((self.staged_view, self.staged), (self.unstaged_view, self.unstaged)):
             # Only the view holding the current file keeps a selection.
             owns = keep is not None and keep[0] == (view is self.staged_view)
-            view.set_files([f for f in files if self.visible(f)], keep if owns else ("", ""))
+            shown = [f for f in files if self.visible(f)]
+            groups = None
+            if view is self.unstaged_view:  # Default always shows, so the list keeps one shape
+                groups = [(changelists.DEFAULT, [f for f in shown if f.path not in members])]
+                groups += [(n, [f for f in shown if members.get(f.path) == n]) for n in names]
+            view.set_files(shown, keep if owns else ("", ""), groups)
         self.staged_ext.set_files(self.staged, self.ext)
         self.unstaged_ext.set_files(self.unstaged, self.ext)
         shown_s, shown_u = self.staged_view.file_count(), self.unstaged_view.file_count()
@@ -928,6 +943,11 @@ class ChangesWindow(QWidget):
             self.stash_btn.setEnabled(bool(self.checked) and not self.busy)
 
     def context_menu(self, view: FileView, pos):
+        item = view.itemAt(pos)
+        data = item.data(0, Qt.UserRole) if item is not None else None
+        if isinstance(data, tuple) and data[0] == GROUP:
+            self.changelist_menu(view, pos, data[1])
+            return
         files = view.item_files_at(pos)
         if not files:
             return
@@ -944,7 +964,9 @@ class ChangesWindow(QWidget):
                        (f"Keep {left} version", lambda: self.keep_side(fc, "ours", left), True),
                        (f"Keep {right} version", lambda: self.keep_side(fc, "theirs", right), True),
                        (None, None, True)] + entries[1:]
+        names = changelists.load(self.path)[0]
         if view is self.unstaged_view:
+            entries.append(("MOVE", None, True))  # the "Move to changelist" submenu
             entries.append(("Discard changes…", lambda: self.discard(files), True))
             entries.append(("Ignore…", lambda: self.ignore(files), True))
             kept_new = set(never_commit.kept_files(self.path))
@@ -953,6 +975,8 @@ class ChangesWindow(QWidget):
             else:
                 entries.append(("Never commit" + ("" if single else f" {len(files)} files"),
                                 lambda: self.never_files(files), all(f.code in "?M" and not f.orig for f in files)))
+        if view is self.staged_view:
+            entries.insert(1, ("UNSTAGE_TO", None, True))
         entries += [
             (None, None, True),
             ("File history && blame", lambda: self.main.open_file_history(self.p, fc.path), single and tracked),
@@ -965,11 +989,89 @@ class ChangesWindow(QWidget):
             if text is None:
                 menu.addSeparator()
                 continue
+            if text in ("MOVE", "UNSTAGE_TO"):
+                self._changelist_submenu(menu, text == "MOVE", files, names)
+                continue
             act = QAction(text, menu)
             act.setEnabled(enabled)
             act.triggered.connect(fn)
             menu.addAction(act)
         menu.exec(view.viewport().mapToGlobal(pos))
+
+    # ---------- changelists ----------
+    def _changelist_submenu(self, menu: QMenu, move: bool, files: list[FileChange], names: list[str]):
+        """Move to changelist ▸ (unstaged files) or Unstage to ▸ (staged files)."""
+        sub = menu.addMenu("Move to changelist" if move else "Unstage to changelist")
+        current = changelists.load(self.path)[1]
+        targets = ([changelists.DEFAULT] if move else []) + names
+        for name in targets:
+            act = QAction(name, sub)
+            if move:
+                act.setEnabled(any(current.get(f.path, changelists.DEFAULT) != name for f in files))
+            act.triggered.connect(lambda _=False, n=name: self._to_changelist(files, n, move))
+            sub.addAction(act)
+        if targets:
+            sub.addSeparator()
+        new = QAction("New changelist…", sub)
+        new.triggered.connect(lambda: self.new_changelist(files, unstage=not move))
+        sub.addAction(new)
+
+    def _to_changelist(self, files: list[FileChange], name: str, move: bool):
+        changelists.move(self.path, [f.path for f in files], name)
+        if move:
+            self.populate()
+        else:
+            self.unstage(files)  # they come back unstaged, already in their changelist
+
+    def new_changelist(self, files: list[FileChange], unstage: bool = False):
+        names = changelists.load(self.path)[0]
+        name, ok = QInputDialog.getText(self, "New changelist", "Name (for example the commit it will become):")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name == changelists.DEFAULT or name in names:
+            QMessageBox.information(self, "New changelist", f"A changelist named {name} already exists.")
+            return
+        changelists.create(self.path, name)
+        if files and (unstage or files[0] in self.unstaged):
+            self._to_changelist(files, name, move=not unstage)
+        else:
+            self.populate()
+
+    def changelist_menu(self, view: FileView, pos, name: str):
+        files = view.group_files(name)
+        menu = QMenu(self)
+        stage = QAction(f"Stage {len(files)} file{'s' if len(files) != 1 else ''}", menu)
+        stage.setEnabled(bool(files))
+        stage.triggered.connect(lambda: self.stage(files))
+        menu.addAction(stage)
+        menu.addSeparator()
+        if name != changelists.DEFAULT:
+            rename = QAction("Rename…", menu)
+            rename.triggered.connect(lambda: self.rename_changelist(name))
+            menu.addAction(rename)
+            delete = QAction("Delete changelist (files go back to Default)", menu)
+            delete.triggered.connect(lambda: (changelists.delete(self.path, name), self.populate()))
+            menu.addAction(delete)
+        new = QAction("New changelist…", menu)
+        new.triggered.connect(lambda: self.new_changelist([]))
+        menu.addAction(new)
+        menu.exec(view.viewport().mapToGlobal(pos))
+
+    def rename_changelist(self, old: str):
+        name, ok = QInputDialog.getText(self, "Rename changelist", "Name:", text=old)
+        name = name.strip()
+        if not ok or not name or name == old:
+            return
+        if name == changelists.DEFAULT or name in changelists.load(self.path)[0]:
+            QMessageBox.information(self, "Rename changelist", f"A changelist named {name} already exists.")
+            return
+        changelists.rename(self.path, old, name)
+        self.populate()
+
+    def on_dropped(self, files: list[FileChange], name: str, source):
+        """Files dragged onto a changelist: moved there, or unstaged into it when they come from Staged."""
+        self._to_changelist(files, name, move=source is not self.staged_view)
 
     def closeEvent(self, event):
         if self.editing and not self.editor.confirm_leave():

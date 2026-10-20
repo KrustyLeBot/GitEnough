@@ -12,7 +12,9 @@ from .style import C, chevron_pixmap
 from .widgets import CODE_COLORS
 
 DIR = "dir"
+GROUP = "group"  # a changelist header: (GROUP, name, file count)
 CLEAR = "clear-filter"
+STAGE_W = 52  # width of the Stage button drawn on a changelist header
 
 
 def extension(path: str) -> str:
@@ -50,7 +52,9 @@ class _Delegate(QStyledItemDelegate):
             state = self.view.check_state(self.view.itemFromIndex(index))
             self._paint_check(p, QRectF(r.left() + 6, r.center().y() - self.BOX / 2, self.BOX, self.BOX), state)
             r = r.adjusted(self.BOX + 6, 0, 0, 0)
-        if isinstance(data, tuple) and data[0] == DIR:
+        if isinstance(data, tuple) and data[0] == GROUP:
+            self._paint_group(p, option, r, data)
+        elif isinstance(data, tuple) and data[0] == DIR:
             self._paint_dir(p, option, r, index, data)
         elif isinstance(data, FileChange):
             self._paint_file(p, option, r, data)
@@ -71,6 +75,35 @@ class _Delegate(QStyledItemDelegate):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(C["accent"]))
             p.drawRoundedRect(box.adjusted(4, 4, -4, -4), 1.5, 1.5)
+
+    def _paint_group(self, p, option, r, data):
+        _, name, count = data
+        x = r.left() + 6
+        dot = QRectF(x, r.center().y() - 4, 8, 8)
+        p.setPen(Qt.NoPen)
+        p.setBrush(QColor(C["faint"] if name == self.view.default_group else C["accent"]))
+        p.drawRoundedRect(dot, 2, 2)
+        font = QFont(option.font)
+        font.setBold(True)
+        p.setFont(font)
+        p.setPen(QColor(C["text"]))
+        right = r.right() - (STAGE_W + 10 if count else 6)
+        text_rect = QRectF(x + 16, r.top(), right - x - 50, r.height())
+        shown = p.fontMetrics().elidedText(name, Qt.ElideRight, int(text_rect.width()))
+        p.drawText(text_rect, Qt.AlignVCenter | Qt.AlignLeft, shown)
+        small = QFont(option.font)
+        small.setPointSizeF(8.5)
+        p.setFont(small)
+        p.setPen(QColor(C["faint"]))
+        p.drawText(QRectF(text_rect.left() + p.fontMetrics().horizontalAdvance(shown) + 26, r.top(), 40, r.height()),
+                   Qt.AlignVCenter | Qt.AlignLeft, str(count))
+        if count and self.view.group_action:
+            box = self.view.stage_rect(r)
+            p.setPen(QPen(QColor(C["accent"]), 1))
+            p.setBrush(QColor(C["accent"]).darker(330))
+            p.drawRoundedRect(box, 6, 6)
+            p.setPen(QColor(C["accent"]).lighter(125))
+            p.drawText(box, Qt.AlignCenter, self.view.group_action)
 
     def _paint_dir(self, p, option, r, index, data):
         _, path, count = data
@@ -155,6 +188,7 @@ class FileView(QTreeWidget):
     activated = Signal(list)  # double-click / Space / Enter on files
     delete_pressed = Signal(list)
     check_toggled = Signal(list, bool)  # files under the clicked box, new state
+    dropped = Signal(list, str, object)  # files dragged here, changelist they were dropped on, the view they came from
 
     def __init__(self, tree_mode: bool = False, parent=None):
         super().__init__(parent)
@@ -164,6 +198,9 @@ class FileView(QTreeWidget):
         self.badges: dict[str, tuple[str, str]] = {}  # path -> (text, color) drawn at the row's right
         self.dim_checked = False  # checked rows drawn muted (files marked as viewed)
         self.files: list[FileChange] = []
+        self.groups: list[tuple[str, list[FileChange]]] | None = None  # changelists, when shown
+        self.default_group = "Default"
+        self.group_action = ""  # label of the button on changelist headers ("Stage"), "" for none
         self._collapsed: set[str] = set()
         self.setObjectName("fileView")
         self.setHeaderHidden(True)
@@ -183,6 +220,11 @@ class FileView(QTreeWidget):
         self.itemDoubleClicked.connect(self._double_clicked)
         self.itemCollapsed.connect(lambda item: self._collapsed.add(self._dir_path(item)))
         self.itemExpanded.connect(lambda item: self._collapsed.discard(self._dir_path(item)))
+        # Files are dragged between changelists (and from the staged list onto one, to unstage them there).
+        self.setDragEnabled(True)
+        self.setAcceptDrops(True)
+        self.setDragDropMode(QAbstractItemView.DragDrop)
+        self.setDefaultDropAction(Qt.MoveAction)
 
     def drawRow(self, painter, option, index):
         # The native style draws an accent bar on selected rows; the delegate draws selection instead.
@@ -206,16 +248,31 @@ class FileView(QTreeWidget):
         if tree != self.tree_mode:
             keep = self.current_file()
             self.tree_mode = tree
-            self.set_files(self.files, keep.key if keep else None)
+            self.set_files(self.files, keep.key if keep else None, self.groups)
 
-    def set_files(self, files: list[FileChange], keep_key=None):
+    def set_files(self, files: list[FileChange], keep_key=None, groups=None):
+        """groups: [(changelist name, its files)] to show the files under changelist headers, or None."""
         scroll = self.verticalScrollBar().value()
         selected = {f.key for f in self.selected_files()} if keep_key is None else {keep_key}
         self.files = list(files)
+        self.groups = groups
         self.blockSignals(True)
         self.clear()
-        self.setRootIsDecorated(self.tree_mode)
-        if self.tree_mode:
+        self.setRootIsDecorated(self.tree_mode or groups is not None)
+        if groups is not None:
+            for name, members in groups:
+                head = QTreeWidgetItem([name])
+                head.setData(0, Qt.UserRole, (GROUP, name, len(members)))
+                head.setToolTip(0, f"{name}: {len(members)} file(s). Space or {self.group_action or 'select'} "
+                                   "acts on all of them; drag files here to move them in")
+                self.addTopLevelItem(head)
+                if self.tree_mode:
+                    self._build_tree(members, head, f"{name}\0")
+                else:
+                    for fc in members:
+                        head.addChild(self._file_item(fc))
+                head.setExpanded(f"\0group:{name}" not in self._collapsed)
+        elif self.tree_mode:
             self._build_tree(files)
         else:
             for fc in files:
@@ -229,7 +286,7 @@ class FileView(QTreeWidget):
                     current = item
         if current is not None:
             # NoUpdate: move the current item without touching the restored selection.
-            self.setCurrentItem(current, 0, QItemSelectionModel.NoUpdate)
+            self._set_current(current, QItemSelectionModel.NoUpdate)
         self.blockSignals(False)
         self.verticalScrollBar().setValue(scroll)
 
@@ -239,7 +296,7 @@ class FileView(QTreeWidget):
         item.setToolTip(0, fc.path + (f"\nfrom {fc.orig}" if fc.orig else ""))
         return item
 
-    def _build_tree(self, files: list[FileChange]):
+    def _build_tree(self, files: list[FileChange], base=None, key_prefix: str = ""):
         root: dict = {}
         for fc in files:
             node = root
@@ -259,19 +316,39 @@ class FileView(QTreeWidget):
                     label, child = f"{label}/{only}", child[only]
                 path = f"{prefix}{label}"
                 item = QTreeWidgetItem([label])
-                item.setData(0, Qt.UserRole, (DIR, path, count(child)))
+                item.setData(0, Qt.UserRole, (DIR, key_prefix + path, count(child)))
                 item.setToolTip(0, path)
                 (parent.addChild if parent else self.addTopLevelItem)(item)
                 add(item, child, path + "/")
-                item.setExpanded(path not in self._collapsed)
+                item.setExpanded(key_prefix + path not in self._collapsed)
             for fc in sorted(node.get(None, []), key=lambda f: f.path.lower()):
                 (parent.addChild if parent else self.addTopLevelItem)(self._file_item(fc))
 
-        add(None, root, "")
+        add(base, root, "")
+
+    def _set_current(self, item, flags=None):
+        """Make item current without scrolling to it: Qt would open the collapsed folders or changelists above it."""
+        self.setAutoScroll(False)
+        if flags is None:
+            self.setCurrentItem(item)
+        else:
+            self.setCurrentItem(item, 0, flags)
+        self.setAutoScroll(True)
+
+    @staticmethod
+    def _shown(item) -> bool:
+        parent = item.parent()
+        while parent is not None:
+            if not parent.isExpanded():
+                return False
+            parent = parent.parent()
+        return True
 
     @staticmethod
     def _dir_path(item) -> str:
         data = item.data(0, Qt.UserRole)
+        if isinstance(data, tuple) and data[0] == GROUP:
+            return f"\0group:{data[1]}"
         return data[1] if isinstance(data, tuple) else ""
 
     def _file_items(self):
@@ -316,19 +393,22 @@ class FileView(QTreeWidget):
             return False
         self.blockSignals(True)
         self.clearSelection()
-        self.setCurrentItem(item)
+        self._set_current(item)
         item.setSelected(True)
         self.blockSignals(False)
-        self.scrollToItem(item)
+        if self._shown(item):  # never open a folder or changelist the user collapsed just to scroll to a file
+            self.scrollToItem(item)
         self.viewport().update()
         return True
 
     def select_first(self) -> bool:
-        first = next(self._file_items(), None)
+        """Select the first file on screen, else the first file (inside a collapsed group, left collapsed)."""
+        items = list(self._file_items())
+        first = next((it for it in items if self._shown(it)), items[0] if items else None)
         if first is None:
             return False
         self.clearSelection()
-        self.setCurrentItem(first)
+        self._set_current(first)
         first.setSelected(True)
         return True
 
@@ -347,6 +427,54 @@ class FileView(QTreeWidget):
         hits = sum(1 for f in files if f.path in self.checks)
         return Qt.Unchecked if not hits else Qt.Checked if hits == len(files) else Qt.PartiallyChecked
 
+    # ---------- changelists ----------
+    def stage_rect(self, row: QRectF) -> QRectF:
+        return QRectF(row.right() - STAGE_W - 4, row.center().y() - 10, STAGE_W, 20)
+
+    def group_at(self, pos) -> str | None:
+        """The changelist of the row under pos (its header or one of its files), or None."""
+        item = self.itemAt(pos)
+        while item is not None:
+            data = item.data(0, Qt.UserRole)
+            if isinstance(data, tuple) and data[0] == GROUP:
+                return data[1]
+            item = item.parent()
+        return None
+
+    def group_files(self, name: str) -> list[FileChange]:
+        return next((members for n, members in (self.groups or []) if n == name), [])
+
+    def _stage_button_group(self, pos) -> str | None:
+        item = self.itemAt(pos)
+        data = item.data(0, Qt.UserRole) if item is not None else None
+        if not (isinstance(data, tuple) and data[0] == GROUP and data[2] and self.group_action):
+            return None
+        row = QRectF(self.visualItemRect(item)).adjusted(2, 1, -4, -1)
+        return data[1] if self.stage_rect(row).contains(QPointF(pos)) else None
+
+    def dragEnterEvent(self, event):
+        if isinstance(event.source(), FileView):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event):
+        ok = isinstance(event.source(), FileView) and self.groups is not None \
+            and self.group_at(event.position().toPoint()) is not None
+        event.acceptProposedAction() if ok else event.ignore()
+
+    def dropEvent(self, event):
+        source = event.source()
+        name = self.group_at(event.position().toPoint()) if self.groups is not None else None
+        if isinstance(source, FileView) and name is not None:
+            files = source.selected_files()
+            event.setDropAction(Qt.CopyAction)  # the window moves the files; the tree must not move rows itself
+            event.accept()
+            if files:
+                self.dropped.emit(files, name, source)
+        else:
+            event.ignore()
+
     # ---------- input ----------
     def _box_item(self, pos):
         """The item whose check box is under pos, else None."""
@@ -357,6 +485,10 @@ class FileView(QTreeWidget):
         return item if left + 2 <= pos.x() <= left + 8 + _Delegate.BOX + 2 else None
 
     def mousePressEvent(self, event):
+        group = self._stage_button_group(event.position().toPoint())
+        if group is not None and event.button() == Qt.LeftButton:
+            self.activated.emit(self.group_files(group))
+            return
         item = self._box_item(event.position().toPoint())
         if item is not None and event.button() == Qt.LeftButton:
             # Checking is independent from selection: the diff on screen stays.
