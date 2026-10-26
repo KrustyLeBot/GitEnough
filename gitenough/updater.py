@@ -80,8 +80,11 @@ def check() -> Release | None:
 
 
 def download(release: Release, progress=None) -> str:
-    """Download the new executable to a temp file and verify it; returns its path."""
-    target = os.path.join(tempfile.gettempdir(), f"GitEnough-{release.version}.exe.download")
+    """Download the new executable next to the running one and verify it; returns its path."""
+    # Same drive as the exe: os.replace cannot move a file across drives (WinError 17).
+    exe = running_exe()
+    folder = os.path.dirname(os.path.abspath(exe)) if exe else tempfile.gettempdir()
+    target = os.path.join(folder, f"GitEnough-{release.version}.exe.download")
     req = urllib.request.Request(release.url, headers={"User-Agent": USER_AGENT})
     digest, done = hashlib.sha256(), 0
     with urllib.request.urlopen(req, timeout=60) as resp, open(target, "wb") as out:
