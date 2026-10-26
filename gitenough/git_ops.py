@@ -1,4 +1,3 @@
-import base64
 import os
 import re
 import shutil
@@ -175,9 +174,14 @@ def _run_git_bytes(args: list[str], cwd: str | None, cred: Credential | None, ti
     env["GIT_OPTIONAL_LOCKS"] = "0"
     env.update(env_extra or {})
     if cred:
-        basic = base64.b64encode(f"{cred.username}:{cred.token}".encode()).decode()
-        # Passed through env, not argv, so the token is neither persisted nor visible in the process list.
-        pairs = [("credential.helper", ""), ("http.extraHeader", f"Authorization: Basic {basic}")]
+        # A credential helper that answers from the environment: git and git-lfs both ask it, where an
+        # http.extraHeader broke LFS downloads (GitLab's own authorization for them got a second one). The token
+        # stays in env, never in argv or a config file. The empty first value drops the user's helpers (no popup).
+        env["GITENOUGH_GIT_USER"] = cred.username or "oauth2"
+        env["GITENOUGH_GIT_TOKEN"] = cred.token
+        helper = ('!f() { test "$1" = get || exit 0; echo "username=$GITENOUGH_GIT_USER"; '
+                  'echo "password=$GITENOUGH_GIT_TOKEN"; }; f')
+        pairs = [("credential.helper", ""), ("credential.helper", helper)]
         env["GIT_CONFIG_COUNT"] = str(len(pairs))
         for i, (key, value) in enumerate(pairs):
             env[f"GIT_CONFIG_KEY_{i}"] = key
